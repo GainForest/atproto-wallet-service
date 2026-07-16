@@ -32,6 +32,20 @@
  */
 import Database from 'better-sqlite3'
 
+export interface SignerStoreOptions {
+  /**
+   * Hold the SQLite EXCLUSIVE lock for the lifetime of this store
+   * (default true). On a durable data disk that is re-attached to a
+   * replacement instance during failover, this guarantees only ONE
+   * process can ever write the nonce/wallet tables — a second instance
+   * attaching the same disk fails fast at startup instead of silently
+   * splitting the monotonic nonce state.
+   */
+  exclusive?: boolean
+  /** How long to wait on SQLITE_BUSY before failing (ms, default 5000). */
+  busyTimeoutMs?: number
+}
+
 export interface EnrollmentRow {
   did: string
   requestPubkeyHex: string
@@ -65,9 +79,23 @@ export interface WalletRow {
 export class SignerStore {
   private readonly db: Database.Database
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, opts: SignerStoreOptions = {}) {
     this.db = new Database(dbPath)
+    this.db.pragma(`busy_timeout = ${Math.max(0, opts.busyTimeoutMs ?? 5000)}`)
     this.db.pragma('journal_mode = WAL')
+    // WAL's default synchronous=NORMAL may lose the most recently
+    // committed transactions on sudden power-off — exactly what spot
+    // preemption looks like. Losing a nonce commit silently re-opens a
+    // replay window for an envelope the user already signed, so this
+    // store pays the fsync cost: every commit is durable before the
+    // HTTP response that depends on it can be sent.
+    this.db.pragma('synchronous = FULL')
+    if (opts.exclusive !== false) {
+      // Single-writer guard for controlled failover (see options doc).
+      // Must be set AFTER entering WAL mode — SQLite cannot change
+      // journal modes while the locking mode is EXCLUSIVE.
+      this.db.pragma('locking_mode = EXCLUSIVE')
+    }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS wallet_enrollment (
         did TEXT PRIMARY KEY,
@@ -98,6 +126,26 @@ export class SignerStore {
         created_at INTEGER NOT NULL
       );
     `)
+    if (opts.exclusive !== false) {
+      // Force a write transaction NOW so the exclusive lock is actually
+      // acquired at startup (fail fast when another instance holds the
+      // disk) instead of lazily on the first wallet write.
+      const v = this.db.pragma('user_version', { simple: true }) as number
+      this.db.pragma(`user_version = ${v}`)
+    }
+  }
+
+  /** Per-connection durability settings — exposed for tests and ops. */
+  durabilityInfo(): {
+    journalMode: string
+    synchronous: number
+    lockingMode: string
+  } {
+    return {
+      journalMode: this.db.pragma('journal_mode', { simple: true }) as string,
+      synchronous: this.db.pragma('synchronous', { simple: true }) as number,
+      lockingMode: this.db.pragma('locking_mode', { simple: true }) as string,
+    }
   }
 
   getEnrollment(did: string): EnrollmentRow | null {
@@ -323,6 +371,16 @@ export class SignerStore {
   }
 
   close(): void {
+    // Flush the WAL into the main database file before closing so a
+    // controlled shutdown (drain → close → detach disk → failover)
+    // leaves a fully checkpointed file behind. Best-effort: close
+    // proceeds regardless.
+    try {
+      this.db.pragma('wal_checkpoint(TRUNCATE)')
+      /* v8 ignore next 3 -- checkpoint failures are not reproducible */
+    } catch {
+      // ignore — close() below is what matters
+    }
     this.db.close()
   }
 }

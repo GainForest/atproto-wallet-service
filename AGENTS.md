@@ -30,22 +30,24 @@ Needs Node >= 20 and a `.env` (copy `.env.example`; set
 
 ## Layout
 
-| Path                   | Role                                                            |
-| ---------------------- | --------------------------------------------------------------- |
-| `src/index.ts`         | Entrypoint — env loading, server bootstrap                      |
-| `src/service.ts`       | Express service surface: all `/v1/wallet/*` routes, auth tiers  |
-| `src/auth/service-auth.ts` | ATProto service-auth JWT verification (enrollment tier)     |
-| `src/envelope.ts`      | User-signed envelope verification (sign/export/recover tier)    |
-| `src/wallet.ts`        | Wallet lifecycle: create, claim, Shamir split/combine, signing  |
-| `src/derive.ts`        | Key derivation (BIP-32/BIP-39, ed25519-hd-key for Solana)       |
-| `src/keys.ts`          | Key types + P-256 request keys                                  |
-| `src/root-seed.ts`     | Enclave root seed (dstack KMS in prod, dev fallback locally)    |
-| `src/store.ts`         | better-sqlite3 persistence                                      |
-| `src/binding.ts`       | Canonical wallet↔DID binding message + signature                |
-| `src/attestation.ts`   | TEE attestation quote endpoint support                          |
-| `src/purposes.ts`      | Domain-separated derivation purposes                            |
-| `lexicons/`            | `app.gainforest.wallet.binding` lexicon                         |
-| `src/__tests__/`       | Vitest suites — one file per module                             |
+| Path                       | Role                                                           |
+| -------------------------- | -------------------------------------------------------------- |
+| `src/index.ts`             | Entrypoint — env loading, server bootstrap                     |
+| `src/service.ts`           | Express service surface: all `/v1/wallet/*` routes, auth tiers |
+| `src/auth/service-auth.ts` | ATProto service-auth JWT verification (enrollment tier)        |
+| `src/envelope.ts`          | User-signed envelope verification (sign/export/recover tier)   |
+| `src/wallet.ts`            | Wallet lifecycle: create, claim, Shamir split/combine, signing |
+| `src/derive.ts`            | Key derivation (BIP-32/BIP-39, ed25519-hd-key for Solana)      |
+| `src/keys.ts`              | Key types + P-256 request keys                                 |
+| `src/root-seed.ts`         | Enclave root seed (env/file sources, dev fallback locally)     |
+| `src/dstack-kms.ts`        | Root seed from external dstack KMS via guest agent (spot-safe) |
+| `src/preemption.ts`        | GCP spot preemption watcher → controlled shutdown              |
+| `src/store.ts`             | better-sqlite3 persistence                                     |
+| `src/binding.ts`           | Canonical wallet↔DID binding message + signature               |
+| `src/attestation.ts`       | TEE attestation quote endpoint support                         |
+| `src/purposes.ts`          | Domain-separated derivation purposes                           |
+| `lexicons/`                | `app.gainforest.wallet.binding` lexicon                        |
+| `src/__tests__/`           | Vitest suites — one file per module                            |
 
 ## Security invariants — do not break these
 

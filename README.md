@@ -64,6 +64,32 @@ Production must run inside a confidential VM
 root seed provisioned by the dstack KMS. `GET /v1/attestation` exposes the
 quote.
 
+## Spot instances / controlled failover
+
+The service is hardened to run on preemptible TDX instances (e.g. GCP
+spot) with an **external dstack KMS** and a **durable data disk**
+(pd-balanced) that is re-attached to the replacement instance:
+
+- **Root seed off the host** — `WALLET_SERVICE_ROOT_SEED_SOURCE=dstack-kms`
+  fetches the seed from the external KMS through the guest-agent socket at
+  every boot (`src/dstack-kms.ts`). The KMS binds the key to the measured
+  app image, so a re-created instance derives the _same_ seed; nothing
+  secret lives on the disposable boot disk.
+- **Durable nonce state** — the sqlite store runs WAL with
+  `synchronous=FULL`, so a committed nonce survives sudden power-off
+  (preemption) and no envelope-replay window re-opens. `close()`
+  checkpoints the WAL so the data disk detaches clean.
+- **Single writer enforced** — the store holds SQLite's EXCLUSIVE lock for
+  its lifetime; a second instance attaching the same data disk fails fast
+  at startup instead of splitting the monotonic nonce state.
+- **Preemption notice** — `WALLET_SERVICE_PREEMPTION_WATCH=gcp` polls the
+  metadata server for the ~30s spot notice (`src/preemption.ts`) in
+  addition to the SIGTERM handler.
+- **Bounded, idempotent shutdown** — `/health` flips to 503 (load-balancer
+  drain), in-flight requests get `WALLET_SERVICE_SHUTDOWN_GRACE_MS`
+  (default 10s) to finish, connections are then force-closed, the store is
+  checkpointed and closed, and the in-memory root seed is wiped.
+
 ## Known gaps / next steps
 
 - [ ] Enrollment TOFU gap: a malicious PDS operator can mint a service-auth
@@ -74,6 +100,8 @@ quote.
       wallet signature for the binding record (message format already in
       `src/binding.ts`; for now clients would use the generic sign flow).
 - [ ] Nonce/freshness anchoring outside the host (rollback-replay window).
+      `synchronous=FULL` closes the crash-loss case; a malicious host
+      restoring an old disk snapshot still needs an external anchor.
 - [ ] XRPC-shaped aliases (`/xrpc/app.gainforest.wallet.*`).
 - [ ] did:web document + `/.well-known/did.json` serving for `SERVICE_DID`.
 - [ ] Rate limiting is in-memory and per-instance only.

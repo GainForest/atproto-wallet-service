@@ -9,6 +9,21 @@
  * Unlike the tPDS signer, this service is client-facing: users on any
  * PDS authenticate with ATProto service-auth JWTs (aud = SERVICE_DID),
  * and wallet operations are authorized by user-signed envelopes.
+ *
+ * Spot / failover hardening: the service is designed to run on
+ * preemptible TDX instances with an external dstack KMS and a durable
+ * data disk. The pieces that make that safe:
+ *   - WALLET_SERVICE_ROOT_SEED_SOURCE=dstack-kms fetches the root seed
+ *     from the external KMS via the guest agent at every boot — nothing
+ *     secret lives on the (disposable) boot disk (src/dstack-kms.ts);
+ *   - the sqlite store runs synchronous=FULL + EXCLUSIVE locking so
+ *     preemption cannot roll back a committed nonce and a failover
+ *     replacement cannot double-attach the data disk (src/store.ts);
+ *   - WALLET_SERVICE_PREEMPTION_WATCH=gcp watches the metadata server
+ *     for the ~30s preemption notice (src/preemption.ts);
+ *   - shutdown is idempotent and bounded: /health flips to 503
+ *     (drain), in-flight requests get a grace period, the WAL is
+ *     checkpointed, and the in-memory root seed is wiped.
  */
 import * as dotenv from 'dotenv'
 dotenv.config()
@@ -18,16 +33,53 @@ import * as fs from 'node:fs'
 import { createLogger } from './lib/shared.js'
 import { createServiceJwtVerifier } from './auth/service-auth.js'
 import { loadRootSeed } from './root-seed.js'
+import { loadRootSeedFromDstackKms } from './dstack-kms.js'
+import { watchGcpPreemption, type PreemptionWatcher } from './preemption.js'
 import { createSignerApp } from './service.js'
 import { SignerStore } from './store.js'
 
 const logger = createLogger('wallet-service')
 
-function main(): void {
+/**
+ * Resolve the root seed. Explicit source selection — a wallet service
+ * must never guess where its key material comes from:
+ *   - 'dstack-kms': external dstack KMS via the local guest agent
+ *     (spot-safe: deterministic across instance re-creation, nothing
+ *     persisted on the host).
+ *   - unset: legacy env-hex / seed-file behavior (dev, pet instances).
+ */
+async function resolveRootSeed(dataDir: string): Promise<Buffer> {
+  const source = (process.env.WALLET_SERVICE_ROOT_SEED_SOURCE || '').trim()
+  if (source === 'dstack-kms') {
+    logger.info('loading root seed from external dstack KMS')
+    return loadRootSeedFromDstackKms({
+      sockPath: process.env.WALLET_SERVICE_DSTACK_SOCK,
+      keyPath: process.env.WALLET_SERVICE_KMS_KEY_PATH,
+    })
+  }
+  if (source !== '') {
+    throw new Error(
+      `Unknown WALLET_SERVICE_ROOT_SEED_SOURCE "${source}" — expected "dstack-kms" or unset`,
+    )
+  }
+  return loadRootSeed({
+    SIGNER_ROOT_SEED_HEX: process.env.WALLET_SERVICE_ROOT_SEED_HEX,
+    SIGNER_ROOT_SEED_FILE:
+      process.env.WALLET_SERVICE_ROOT_SEED_FILE ||
+      path.join(dataDir, 'root-seed'),
+    SIGNER_ALLOW_DEV_SEED: process.env.WALLET_SERVICE_ALLOW_DEV_SEED,
+  })
+}
+
+async function main(): Promise<void> {
   const port = parseInt(process.env.WALLET_SERVICE_PORT || '3020', 10)
   const dataDir = process.env.WALLET_SERVICE_DATA_DIR || './data/wallet-service'
   const internalSecret = process.env.WALLET_SERVICE_ADMIN_SECRET || ''
   const serviceDid = process.env.SERVICE_DID || ''
+  const shutdownGraceMs = parseInt(
+    process.env.WALLET_SERVICE_SHUTDOWN_GRACE_MS || '10000',
+    10,
+  )
 
   if (!internalSecret) {
     throw new Error('WALLET_SERVICE_ADMIN_SECRET must be set')
@@ -38,17 +90,12 @@ function main(): void {
     )
   }
 
-  const rootSeed = loadRootSeed({
-    SIGNER_ROOT_SEED_HEX: process.env.WALLET_SERVICE_ROOT_SEED_HEX,
-    SIGNER_ROOT_SEED_FILE:
-      process.env.WALLET_SERVICE_ROOT_SEED_FILE ||
-      path.join(dataDir, 'root-seed'),
-    SIGNER_ALLOW_DEV_SEED: process.env.WALLET_SERVICE_ALLOW_DEV_SEED,
-  })
+  const rootSeed = await resolveRootSeed(dataDir)
 
   fs.mkdirSync(dataDir, { recursive: true })
   const store = new SignerStore(path.join(dataDir, 'wallet-service.sqlite'))
 
+  let draining = false
   const app = createSignerApp({
     rootSeed,
     store,
@@ -61,26 +108,74 @@ function main(): void {
       ? parseInt(process.env.WALLET_SERVICE_FRESHNESS_SEC, 10)
       : undefined,
     dstackSockPath: process.env.WALLET_SERVICE_DSTACK_SOCK,
+    isDraining: () => draining,
   })
 
   const server = app.listen(port, () => {
     logger.info({ port, serviceDid }, 'atproto-wallet-service running')
   })
 
-  const shutdown = () => {
-    logger.info('atproto-wallet-service shutting down')
+  let preemptionWatcher: PreemptionWatcher | undefined
+
+  /**
+   * Controlled shutdown, sized to fit inside GCP's ~30s spot
+   * preemption window. Idempotent — SIGTERM, SIGINT, and the
+   * preemption watcher may all fire for the same event.
+   *
+   * Order matters:
+   *   1. flip /health to 503 so the LB drains us (failover starts);
+   *   2. stop accepting connections, close idle keep-alives;
+   *   3. give in-flight requests a bounded grace period;
+   *   4. checkpoint + close the store (durable disk left clean);
+   *   5. wipe the in-memory root seed and exit.
+   */
+  let shuttingDown = false
+  const shutdown = (reason: string): void => {
+    if (shuttingDown) return
+    shuttingDown = true
+    draining = true
+    preemptionWatcher?.stop()
+    logger.info(
+      { reason, graceMs: shutdownGraceMs },
+      'atproto-wallet-service shutting down',
+    )
+
+    const finish = (code: number): void => {
+      try {
+        store.close()
+      } catch (err) {
+        logger.error({ err }, 'store close failed during shutdown')
+        code = 1
+      }
+      rootSeed.fill(0)
+      process.exit(code)
+    }
+
+    const deadline = setTimeout(() => {
+      logger.warn('shutdown grace period expired — forcing connection close')
+      server.closeAllConnections()
+      finish(1)
+    }, shutdownGraceMs)
+    deadline.unref()
+
     server.close(() => {
-      store.close()
-      process.exit(0)
+      clearTimeout(deadline)
+      finish(0)
     })
+    server.closeIdleConnections()
   }
-  process.on('SIGTERM', shutdown)
-  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', () => shutdown('SIGTERM'))
+  process.on('SIGINT', () => shutdown('SIGINT'))
+
+  if (process.env.WALLET_SERVICE_PREEMPTION_WATCH === 'gcp') {
+    preemptionWatcher = watchGcpPreemption({
+      onPreempted: () => shutdown('gcp-spot-preemption'),
+    })
+    logger.info('GCP spot preemption watcher active')
+  }
 }
 
-try {
-  main()
-} catch (err) {
+main().catch((err) => {
   logger.fatal({ err }, 'Failed to start atproto-wallet-service')
   process.exit(1)
-}
+})

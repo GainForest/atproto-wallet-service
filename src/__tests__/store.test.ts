@@ -174,3 +174,60 @@ describe('SignerStore.consumeNonce', () => {
     expect(store.consumeNonce('did:plc:b', 5)).toBe(true)
   })
 })
+
+describe('SignerStore durability & single-writer (spot hardening)', () => {
+  it('runs WAL with synchronous=FULL and an exclusive lock by default', () => {
+    const info = store.durabilityInfo()
+    expect(info.journalMode).toBe('wal')
+    expect(info.synchronous).toBe(2) // FULL — nonce commits survive preemption
+    expect(info.lockingMode).toBe('exclusive')
+  })
+
+  it('a second instance on the same file fails fast at startup', () => {
+    // `store` (beforeEach) already holds the exclusive lock on the
+    // durable-disk database — a failover replacement attaching the same
+    // disk while we are alive must refuse to start.
+    expect(
+      () =>
+        new SignerStore(path.join(dir, 'signer.sqlite'), {
+          busyTimeoutMs: 100,
+        }),
+    ).toThrow(/database is locked/)
+  })
+
+  it('allows shared connections when exclusive mode is disabled', () => {
+    const p = path.join(dir, 'shared.sqlite')
+    const a = new SignerStore(p, { exclusive: false })
+    const b = new SignerStore(p, { exclusive: false, busyTimeoutMs: 100 })
+    try {
+      a.enroll('did:plc:shared', '02aa')
+      expect(b.getEnrollment('did:plc:shared')?.requestPubkeyHex).toBe('02aa')
+      expect(a.durabilityInfo().lockingMode).toBe('normal')
+    } finally {
+      a.close()
+      b.close()
+    }
+  })
+
+  it('close() leaves a fully checkpointed database behind', () => {
+    const p = path.join(dir, 'ckpt.sqlite')
+    const s = new SignerStore(p)
+    s.enroll('did:plc:ckpt', '02aa')
+    s.consumeNonce('did:plc:ckpt', 1)
+    s.close()
+    // After a controlled shutdown the WAL must be flushed into the main
+    // file so the durable disk can be detached and re-attached cleanly.
+    const wal = `${p}-wal`
+    if (fs.existsSync(wal)) expect(fs.statSync(wal).size).toBe(0)
+    const reopened = new SignerStore(p)
+    try {
+      expect(reopened.getEnrollment('did:plc:ckpt')?.requestPubkeyHex).toBe(
+        '02aa',
+      )
+      // The consumed nonce survived — no replay window re-opened.
+      expect(reopened.consumeNonce('did:plc:ckpt', 1)).toBe(false)
+    } finally {
+      reopened.close()
+    }
+  })
+})

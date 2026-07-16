@@ -101,6 +101,13 @@ export interface SignerServiceOptions {
   verifyServiceJwt: VerifyServiceJwt
   freshnessSec?: number
   dstackSockPath?: string
+  /**
+   * When provided and returning true, /health flips to 503 — the
+   * load-balancer drain signal during controlled shutdown/failover
+   * (spot preemption, deploys). Existing in-flight requests still
+   * complete; new traffic is steered away.
+   */
+  isDraining?: () => boolean
 }
 
 /** lxm values — the lexicon method each service-auth token must target. */
@@ -199,6 +206,12 @@ export function createSignerApp(opts: SignerServiceOptions): Application {
     }
 
   app.get('/health', (_req, res) => {
+    if (opts.isDraining?.()) {
+      res
+        .status(503)
+        .json({ status: 'draining', service: 'atproto-wallet-service' })
+      return
+    }
     res.json({ status: 'ok', service: 'atproto-wallet-service' })
   })
 

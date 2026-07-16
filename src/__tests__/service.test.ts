@@ -835,3 +835,36 @@ describe('GET /v1/wallet/public/:did (open)', () => {
     expect((await fetch(`${base}/v1/wallet/public/garbage`)).status).toBe(400)
   })
 })
+
+describe('draining /health (controlled shutdown & failover)', () => {
+  it('flips /health to 503 when isDraining reports true', async () => {
+    let draining = false
+    const drainStore = new SignerStore(':memory:')
+    const app = createSignerApp({
+      rootSeed: seed,
+      store: drainStore,
+      internalSecret: SECRET,
+      verifyServiceJwt: fakeVerifyServiceJwt,
+      isDraining: () => draining,
+    })
+    const srv = await new Promise<Server>((resolve) => {
+      const s = app.listen(0, () => resolve(s))
+    })
+    const addr = srv.address()
+    const drainBase =
+      typeof addr === 'object' && addr ? `http://127.0.0.1:${addr.port}` : ''
+    try {
+      const healthy = await fetch(`${drainBase}/health`)
+      expect(healthy.status).toBe(200)
+      expect((await healthy.json()).status).toBe('ok')
+
+      draining = true
+      const drainingRes = await fetch(`${drainBase}/health`)
+      expect(drainingRes.status).toBe(503)
+      expect((await drainingRes.json()).status).toBe('draining')
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()))
+      drainStore.close()
+    }
+  })
+})
