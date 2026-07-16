@@ -34,9 +34,11 @@ import { createLogger } from './lib/shared.js'
 import { createServiceJwtVerifier } from './auth/service-auth.js'
 import { loadRootSeed } from './root-seed.js'
 import { loadRootSeedFromDstackKms } from './dstack-kms.js'
+import { getAttestation } from './attestation.js'
+import { assertProductionConfig, isProduction } from './production.js'
 import { watchGcpPreemption, type PreemptionWatcher } from './preemption.js'
 import { createSignerApp } from './service.js'
-import { SignerStore } from './store.js'
+import { SqliteWalletStateRepository } from './store.js'
 
 const logger = createLogger('wallet-service')
 
@@ -72,6 +74,10 @@ async function resolveRootSeed(dataDir: string): Promise<Buffer> {
 }
 
 async function main(): Promise<void> {
+  // Fail before touching any wallet state: production must never use a
+  // file/env/dev seed, even if one happens to be configured.
+  assertProductionConfig(process.env)
+  const production = isProduction(process.env)
   const port = parseInt(process.env.WALLET_SERVICE_PORT || '3020', 10)
   const dataDir = process.env.WALLET_SERVICE_DATA_DIR || './data/wallet-service'
   const internalSecret = process.env.WALLET_SERVICE_ADMIN_SECRET || ''
@@ -80,7 +86,20 @@ async function main(): Promise<void> {
     process.env.WALLET_SERVICE_SHUTDOWN_GRACE_MS || '10000',
     10,
   )
+  const trustProxyHops = parseInt(
+    process.env.WALLET_SERVICE_TRUST_PROXY_HOPS || '0',
+    10,
+  )
 
+  if (
+    !Number.isSafeInteger(trustProxyHops) ||
+    trustProxyHops < 0 ||
+    trustProxyHops > 8
+  ) {
+    throw new Error(
+      'WALLET_SERVICE_TRUST_PROXY_HOPS must be an integer from 0 to 8',
+    )
+  }
   if (!internalSecret) {
     throw new Error('WALLET_SERVICE_ADMIN_SECRET must be set')
   }
@@ -91,9 +110,30 @@ async function main(): Promise<void> {
   }
 
   const rootSeed = await resolveRootSeed(dataDir)
+  const stateKeyEpoch = parseInt(
+    process.env.WALLET_SERVICE_STATE_KEY_EPOCH || '1',
+    10,
+  )
+  if (!Number.isSafeInteger(stateKeyEpoch) || stateKeyEpoch < 1) {
+    throw new Error('WALLET_SERVICE_STATE_KEY_EPOCH must be a positive integer')
+  }
+
+  // A quote endpoint that silently downgrades to dev mode is unsafe in
+  // production. Probe the guest agent before opening the HTTP listener;
+  // the real endpoint later binds its quote to the identity key.
+  if (production) {
+    await getAttestation({
+      reportDataHex: '00'.repeat(32),
+      dstackSockPath: process.env.WALLET_SERVICE_DSTACK_SOCK,
+      requireTee: true,
+    })
+  }
 
   fs.mkdirSync(dataDir, { recursive: true })
-  const store = new SignerStore(path.join(dataDir, 'wallet-service.sqlite'))
+  const store = new SqliteWalletStateRepository(
+    path.join(dataDir, 'wallet-service.sqlite'),
+    { rootSeed, keyEpoch: stateKeyEpoch },
+  )
 
   let draining = false
   const app = createSignerApp({
@@ -107,7 +147,10 @@ async function main(): Promise<void> {
     freshnessSec: process.env.WALLET_SERVICE_FRESHNESS_SEC
       ? parseInt(process.env.WALLET_SERVICE_FRESHNESS_SEC, 10)
       : undefined,
+    stateKeyEpoch,
     dstackSockPath: process.env.WALLET_SERVICE_DSTACK_SOCK,
+    requireTeeAttestation: production,
+    trustProxyHops,
     isDraining: () => draining,
     serviceDid,
   })

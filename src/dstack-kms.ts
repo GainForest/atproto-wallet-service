@@ -20,7 +20,7 @@
  * (root-seed.ts and friends) stays pure.
  */
 import * as crypto from 'node:crypto'
-import * as http from 'node:http'
+import { DstackClient } from '@phala/dstack-sdk'
 import { ROOT_SEED_BYTES } from './root-seed.js'
 
 export class DstackKmsError extends Error {}
@@ -30,49 +30,24 @@ export const DEFAULT_KMS_KEY_PATH = 'wallet-service/root-seed'
 const DEFAULT_PURPOSE = 'root-seed'
 const HKDF_INFO = 'atproto-wallet-service/root-seed/v1'
 
-/** GET /GetKey from the dstack guest agent over its unix socket. */
-function fetchDstackKey(
+/** Fetch key material through the official dstack guest-agent SDK. */
+async function fetchDstackKey(
   socketPath: string,
   keyPath: string,
   purpose: string,
-  timeoutMs: number,
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const query = `path=${encodeURIComponent(keyPath)}&purpose=${encodeURIComponent(purpose)}`
-    const req = http.request(
-      {
-        socketPath,
-        path: `/GetKey?${query}`,
-        method: 'GET',
-        timeout: timeoutMs,
-      },
-      (res) => {
-        const chunks: Buffer[] = []
-        res.on('data', (c: Buffer) => chunks.push(c))
-        res.on('end', () => {
-          try {
-            const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-            if (typeof body.key === 'string' && body.key.length > 0) {
-              resolve(body.key)
-            } else {
-              reject(new DstackKmsError('dstack GetKey response missing key'))
-            }
-          } catch (err) {
-            reject(
-              new DstackKmsError(
-                `dstack GetKey response unparsable: ${err instanceof Error ? err.message : String(err)}`,
-              ),
-            )
-          }
-        })
-      },
+): Promise<Uint8Array> {
+  try {
+    const response = await new DstackClient(socketPath).getKey(keyPath, purpose)
+    if (!(response.key instanceof Uint8Array) || response.key.length === 0) {
+      throw new DstackKmsError('dstack GetKey response missing key')
+    }
+    return response.key
+  } catch (err) {
+    if (err instanceof DstackKmsError) throw err
+    throw new DstackKmsError(
+      `dstack GetKey failed: ${err instanceof Error ? err.message : String(err)}`,
     )
-    req.on('error', (err) =>
-      reject(new DstackKmsError(`dstack GetKey failed: ${err.message}`)),
-    )
-    req.on('timeout', () => req.destroy(new Error('dstack GetKey timeout')))
-    req.end()
-  })
+  }
 }
 
 /**
@@ -85,19 +60,15 @@ export async function loadRootSeedFromDstackKms(
     sockPath?: string
     keyPath?: string
     purpose?: string
-    timeoutMs?: number
   } = {},
 ): Promise<Buffer> {
-  const keyHex = await fetchDstackKey(
+  const key = await fetchDstackKey(
     opts.sockPath ?? DEFAULT_DSTACK_SOCK,
     opts.keyPath ?? DEFAULT_KMS_KEY_PATH,
     opts.purpose ?? DEFAULT_PURPOSE,
-    opts.timeoutMs ?? 10_000,
   )
-  if (!/^([0-9a-fA-F]{2})+$/.test(keyHex)) {
-    throw new DstackKmsError('dstack KMS key material is not valid hex')
-  }
-  const ikm = Buffer.from(keyHex, 'hex')
+  const ikm = Buffer.from(key)
+  key.fill(0)
   try {
     if (ikm.length < ROOT_SEED_BYTES) {
       throw new DstackKmsError(

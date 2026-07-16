@@ -1,0 +1,26 @@
+services:
+  wallet-service:
+    # Deployment tooling must replace this with the pushed OCI digest.
+    image: ghcr.io/gainforest/atproto-wallet-service@sha256:IMAGE_DIGEST_REQUIRED
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - '3020:3020'
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - wallet-state:/var/lib/atproto-wallet-service
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 20s
+
+volumes:
+  # Clean security epoch. dstack encrypts workload storage; replacing this
+  # state requires an explicit reset or migration rather than reusing the
+  # operator-readable disk from the unattested demo.
+  wallet-state:

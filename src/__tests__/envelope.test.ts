@@ -64,9 +64,22 @@ describe('verifyEnvelope', () => {
     }
   })
 
-  it('accepts an explicit op: sign', () => {
-    const result = verify(makeEnvelope({ ...basePayload, op: 'sign' }))
+  it('accepts request and expected-state versions', () => {
+    const result = verify(
+      makeEnvelope({
+        ...basePayload,
+        op: 'sign',
+        requestId: 'request_1234',
+        stateVersion: 7,
+        shareSetVersion: 2,
+      }),
+    )
     expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.payload.requestId).toBe('request_1234')
+      expect(result.payload.stateVersion).toBe(7)
+      expect(result.payload.shareSetVersion).toBe(2)
+    }
   })
 
   it('accepts a solana envelope with messageBase64', () => {
@@ -149,6 +162,10 @@ describe('verifyEnvelope', () => {
     ['bad did', { ...basePayload, did: 'not-a-did' }],
     ['zero nonce', { ...basePayload, nonce: 0 }],
     ['float nonce', { ...basePayload, nonce: 1.5 }],
+    ['short request id', { ...basePayload, requestId: 'short' }],
+    ['invalid request id', { ...basePayload, requestId: 'not valid!' }],
+    ['negative state version', { ...basePayload, stateVersion: -1 }],
+    ['zero share-set version', { ...basePayload, shareSetVersion: 0 }],
     ['missing digest', { ...basePayload, digestHex: undefined }],
     ['short digest', { ...basePayload, digestHex: 'ab'.repeat(16) }],
     ['missing device share', { ...basePayload, deviceShareJwe: undefined }],

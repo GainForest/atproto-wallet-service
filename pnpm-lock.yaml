@@ -22,6 +22,9 @@ importers:
       '@noble/hashes':
         specifier: ^1.8.0
         version: 1.8.0
+      '@phala/dstack-sdk':
+        specifier: 0.5.8
+        version: 0.5.8(@noble/curves@1.9.7)(@noble/hashes@1.8.0)
       '@scure/bip32':
         specifier: ^1.7.0
         version: 1.7.0
@@ -457,6 +460,25 @@ packages:
       {
         integrity: sha512-1a7ZKmrRTCoN1XMZ4L0PyyqrMnrNlLyPuOkdSX2MZg7IiIGRUyurNhAm73ptDOraoBcIordsIGKNPKUzy3ZmfA==,
       }
+
+  '@phala/dstack-sdk@0.5.8':
+    resolution:
+      {
+        integrity: sha512-VANlyo0Jj6pxmJl3zksHJ4/5y3VflApVmgsfcfmokk3KYKRBkW5oMkexBTR6lZaGVPOqJ48QGOLP/7CF3IEvFg==,
+      }
+    engines: { node: '>=18.0.0' }
+    peerDependencies:
+      '@noble/curves': ^1.8.1
+      '@noble/hashes': ^1.6.1
+      '@solana/web3.js': ^1.98.4
+      viem: ^2.43.3
+    peerDependenciesMeta:
+      '@noble/curves':
+        optional: true
+      '@solana/web3.js':
+        optional: true
+      viem:
+        optional: true
 
   '@pinojs/redact@0.4.0':
     resolution:
@@ -2562,6 +2584,12 @@ snapshots:
   '@noble/hashes@1.8.0': {}
 
   '@oxc-project/types@0.138.0': {}
+
+  '@phala/dstack-sdk@0.5.8(@noble/curves@1.9.7)(@noble/hashes@1.8.0)':
+    dependencies:
+      '@noble/hashes': 1.8.0
+    optionalDependencies:
+      '@noble/curves': 1.9.7
 
   '@pinojs/redact@0.4.0': {}
 

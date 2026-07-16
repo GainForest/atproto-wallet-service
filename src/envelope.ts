@@ -57,6 +57,24 @@ export interface WalletEnvelopePayload {
   deviceShareJwe: string
   nonce: number
   iat: number
+  /** Random client operation ID. When present, a committed retry
+   * returns the exact stored response instead of replay-failing. */
+  requestId?: string
+  /** Expected aggregate version for optimistic client coordination. */
+  stateVersion?: number
+  /** Expected wallet share set; rejects an envelope prepared against
+   * shares that were rotated by a concurrent recovery. */
+  shareSetVersion?: number
+}
+
+/** UUIDs and base64url random identifiers both satisfy this shape. */
+export function isValidRequestId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length >= 8 &&
+    value.length <= 128 &&
+    /^[A-Za-z0-9_-]+$/.test(value)
+  )
 }
 
 export type EnvelopeResult =
@@ -85,6 +103,20 @@ function parsePayload(bytes: Buffer): WalletEnvelopePayload | null {
   if (!Number.isSafeInteger(p.nonce) || (p.nonce as number) <= 0) return null
   if (!Number.isSafeInteger(p.iat)) return null
   if (!isCompactJwe(p.deviceShareJwe)) return null
+  if (p.requestId !== undefined && !isValidRequestId(p.requestId)) return null
+  if (
+    p.stateVersion !== undefined &&
+    (!Number.isSafeInteger(p.stateVersion) || (p.stateVersion as number) < 0)
+  ) {
+    return null
+  }
+  if (
+    p.shareSetVersion !== undefined &&
+    (!Number.isSafeInteger(p.shareSetVersion) ||
+      (p.shareSetVersion as number) < 1)
+  ) {
+    return null
+  }
 
   if (op === 'sign') {
     if (!isWalletPurpose(p.purpose)) return null
@@ -113,6 +145,9 @@ function parsePayload(bytes: Buffer): WalletEnvelopePayload | null {
     deviceShareJwe: p.deviceShareJwe,
     nonce: p.nonce as number,
     iat: p.iat as number,
+    requestId: p.requestId as string | undefined,
+    stateVersion: p.stateVersion as number | undefined,
+    shareSetVersion: p.shareSetVersion as number | undefined,
   }
 }
 

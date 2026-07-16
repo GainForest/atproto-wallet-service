@@ -22,6 +22,7 @@ import { createSignerApp, isCompressedP256Hex, LXM } from '../service.js'
 import { SignerStore } from '../store.js'
 
 const SECRET = 'test-internal-secret'
+const SERVICE_DID = 'did:web:wallet.example.com'
 
 /**
  * Fake service-auth verifier: tokens are base64url JSON {did, lxm}.
@@ -60,6 +61,7 @@ let recoveryShare: Uint8Array
 let exportedEntropy: Uint8Array
 let evmPubkeyHex: string
 let solPubkeyHex: string
+let createResponse: Record<string, unknown>
 
 function userPrivJwk(priv: Uint8Array): JWK {
   const uncompressed = p256.getPublicKey(priv, false)
@@ -93,7 +95,11 @@ function signEnvelope(
   payload: Record<string, unknown>,
   signWith: Uint8Array = userPriv,
 ): { payload: string; sig: string } {
-  const bytes = Buffer.from(JSON.stringify(payload), 'utf8')
+  const withRequestId = {
+    ...payload,
+    requestId: payload.requestId ?? nextRequestId(),
+  }
+  const bytes = Buffer.from(JSON.stringify(withRequestId), 'utf8')
   const sig = p256
     .sign(bytes, signWith, { prehash: true, lowS: false })
     .toBytes('compact')
@@ -108,6 +114,19 @@ async function post(
   body: unknown,
   opts: { secret?: string; token?: string } = { secret: SECRET },
 ): Promise<{ status: number; json: Record<string, unknown> }> {
+  const needsRequestId = [
+    '/v1/wallet/create',
+    '/v1/wallet/recover',
+    '/v1/wallet/recover-export',
+  ].includes(route)
+  const requestBody =
+    needsRequestId && typeof body === 'object' && body !== null
+      ? {
+          ...(body as Record<string, unknown>),
+          requestId:
+            (body as Record<string, unknown>).requestId ?? nextRequestId(),
+        }
+      : body
   const res = await fetch(`${base}${route}`, {
     method: 'POST',
     headers: {
@@ -115,7 +134,7 @@ async function post(
       ...(opts.secret ? { 'x-internal-secret': opts.secret } : {}),
       ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}),
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(requestBody),
   })
   return {
     status: res.status,
@@ -140,6 +159,8 @@ async function get(
 }
 
 const nowSec = () => Math.floor(Date.now() / 1000)
+let requestCounter = 0
+const nextRequestId = () => `test-request-${++requestCounter}`
 
 interface WalletInfoJson {
   evm: { address: string; publicKeyHex: string }
@@ -156,13 +177,16 @@ interface ExportJson {
 
 beforeAll(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'epds-signer-svc-'))
-  store = new SignerStore(path.join(dir, 'signer.sqlite'))
+  store = new SignerStore(path.join(dir, 'signer.sqlite'), {
+    rootSeed: seed,
+  })
   const app = createSignerApp({
     rootSeed: seed,
     store,
     internalSecret: SECRET,
     verifyServiceJwt: fakeVerifyServiceJwt,
     dstackSockPath: path.join(dir, 'no-such-socket'),
+    serviceDid: SERVICE_DID,
   })
   await new Promise<void>((resolve) => {
     server = app.listen(0, () => {
@@ -203,6 +227,7 @@ describe('open endpoints', () => {
       reportData: string
       identityPublicKeyHex: string
       walletEncryptionPublicJwk?: JWK
+      manifest?: { serviceDid: string; protocol: string }
     }
     expect(res.status).toBe(200)
     expect(body.mode).toBe('dev')
@@ -211,7 +236,26 @@ describe('open endpoints', () => {
     expect(body.identityPublicKeyHex).toMatch(/^0[23][0-9a-f]{64}$/)
     expect(body.walletEncryptionPublicJwk?.kty).toBe('EC')
     expect(body.walletEncryptionPublicJwk?.crv).toBe('P-256')
+    expect(body.manifest).toMatchObject({
+      serviceDid: SERVICE_DID,
+      protocol: 'atproto-wallet-service/v1',
+    })
     enclaveJwk = body.walletEncryptionPublicJwk as JWK
+  })
+
+  it('binds a valid challenge and rejects malformed challenges', async () => {
+    const challenge = Buffer.alloc(32, 3).toString('base64url')
+    const valid = await fetch(`${base}/v1/attestation?challenge=${challenge}`)
+    const body = (await valid.json()) as {
+      challenge: string
+      reportData: string
+    }
+    expect(valid.status).toBe(200)
+    expect(body.challenge).toBe(challenge)
+    expect(body.reportData).toMatch(/^[0-9a-f]{128}$/)
+
+    const invalid = await fetch(`${base}/v1/attestation?challenge=short`)
+    expect(invalid.status).toBe(400)
   })
 })
 
@@ -347,12 +391,26 @@ describe('wallet lifecycle (2-of-3 shares)', () => {
     expect(res.json.error).toMatch(/no wallet exists/)
   })
 
+  it('requires a client requestId for stranding-prone creation', async () => {
+    const res = await fetch(`${base}/v1/wallet/create`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${makeToken(did, LXM.create)}`,
+      },
+      body: '{}',
+    })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toMatch(/requestId/)
+  })
+
   it('creates the wallet and returns user shares as JWEs', async () => {
     const res = await post(
       '/v1/wallet/create',
-      {},
+      { requestId: 'create-main-wallet' },
       { token: makeToken(did, LXM.create) },
     )
+    createResponse = res.json
     expect(res.status).toBe(200)
     expect(res.json.status).toBe('created')
     const wallet = res.json.wallet as WalletInfoJson
@@ -369,7 +427,17 @@ describe('wallet lifecycle (2-of-3 shares)', () => {
     expect(recoveryShare.length).toBeGreaterThan(16)
   })
 
-  it('refuses to create the wallet twice', async () => {
+  it('returns the exact committed create receipt on retry', async () => {
+    const retry = await post(
+      '/v1/wallet/create',
+      { requestId: 'create-main-wallet' },
+      { token: makeToken(did, LXM.create) },
+    )
+    expect(retry.status).toBe(200)
+    expect(retry.json).toEqual(createResponse)
+  })
+
+  it('refuses to create the wallet twice under a new requestId', async () => {
     const res = await post(
       '/v1/wallet/create',
       {},
@@ -402,9 +470,13 @@ describe('wallet lifecycle (2-of-3 shares)', () => {
       deviceShareJwe: await encryptToEnclave(deviceShare),
       nonce: 10,
       iat: nowSec(),
+      requestId: 'sign-main-request',
     })
     const res = await post('/v1/wallet/sign', env)
     expect(res.status).toBe(200)
+    const retry = await post('/v1/wallet/sign', env)
+    expect(retry.status).toBe(200)
+    expect(retry.json).toEqual(res.json)
     expect(res.json.recovery === 0 || res.json.recovery === 1).toBe(true)
     const ok = secp256k1.verify(
       Uint8Array.from(Buffer.from(res.json.signatureHex as string, 'hex')),
@@ -413,6 +485,21 @@ describe('wallet lifecycle (2-of-3 shares)', () => {
       { prehash: false },
     )
     expect(ok).toBe(true)
+  })
+
+  it('rejects requestId reuse with different signed parameters', async () => {
+    const env = signEnvelope({
+      did,
+      purpose: 'wallet/evm',
+      digestHex: 'ce'.repeat(32),
+      deviceShareJwe: await encryptToEnclave(deviceShare),
+      nonce: 12,
+      iat: nowSec(),
+      requestId: 'sign-main-request',
+    })
+    const res = await post('/v1/wallet/sign', env)
+    expect(res.status).toBe(409)
+    expect(res.json.error).toMatch(/requestId/)
   })
 
   it('rejects a replayed nonce', async () => {
@@ -464,6 +551,23 @@ describe('wallet lifecycle (2-of-3 shares)', () => {
     const res = await post('/v1/wallet/sign', env)
     expect(res.status).toBe(403)
     expect(res.json.error).toBe('invalid signature')
+  })
+
+  it('allows only one winner for concurrent envelopes with the same nonce', async () => {
+    const make = async (digest: string) =>
+      signEnvelope({
+        did,
+        purpose: 'wallet/evm',
+        digestHex: digest.repeat(32),
+        deviceShareJwe: await encryptToEnclave(deviceShare),
+        nonce: 12,
+        iat: nowSec(),
+      })
+    const [a, b] = await Promise.all([
+      post('/v1/wallet/sign', await make('71')),
+      post('/v1/wallet/sign', await make('72')),
+    ])
+    expect([a.status, b.status].sort()).toEqual([200, 409])
   })
 
   it('rejects a share that is not this wallet’s share', async () => {
@@ -552,12 +656,17 @@ describe('wallet lifecycle (2-of-3 shares)', () => {
     const newPubHex = Buffer.from(p256.getPublicKey(newPriv, true)).toString(
       'hex',
     )
-    const res = await post('/v1/wallet/recover', {
+    const recoveryBody = {
       did,
       recoveryShareJwe: await encryptToEnclave(recoveryShare),
       requestPublicKeyHex: newPubHex,
-    })
+      requestId: 'recover-main-wallet',
+    }
+    const res = await post('/v1/wallet/recover', recoveryBody)
     expect(res.status).toBe(200)
+    const retry = await post('/v1/wallet/recover', recoveryBody)
+    expect(retry.status).toBe(200)
+    expect(retry.json).toEqual(res.json)
     expect(res.json.status).toBe('recovered')
     expect(res.json.version).toBe(2)
 
@@ -839,7 +948,7 @@ describe('GET /v1/wallet/public/:did (open)', () => {
 describe('draining /health (controlled shutdown & failover)', () => {
   it('flips /health to 503 when isDraining reports true', async () => {
     let draining = false
-    const drainStore = new SignerStore(':memory:')
+    const drainStore = new SignerStore(':memory:', { rootSeed: seed })
     const app = createSignerApp({
       rootSeed: seed,
       store: drainStore,
@@ -875,7 +984,7 @@ describe('GET /.well-known/did.json (did:web resolution)', () => {
     base: string
     store: SignerStore
   }> {
-    const s = new SignerStore(':memory:')
+    const s = new SignerStore(':memory:', { rootSeed: seed })
     const app = createSignerApp({
       rootSeed: seed,
       store: s,
@@ -930,7 +1039,7 @@ describe('GET /.well-known/did.json (did:web resolution)', () => {
   })
 
   it('fails loud at startup for a path-based did:web', () => {
-    const s = new SignerStore(':memory:')
+    const s = new SignerStore(':memory:', { rootSeed: seed })
     try {
       expect(() =>
         createSignerApp({

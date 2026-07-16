@@ -15,7 +15,7 @@
  * refuse to proceed.
  */
 import * as fs from 'node:fs'
-import * as http from 'node:http'
+import { DstackClient } from '@phala/dstack-sdk'
 
 export interface AttestationResult {
   mode: 'dstack' | 'dev'
@@ -23,66 +23,70 @@ export interface AttestationResult {
   reportData: string
   /** hex-encoded hardware quote, or null in dev mode */
   quote: string | null
+  /** Measured dstack event log required to replay the RTMR values. */
+  eventLog?: string
+  /** dstack VM configuration covered by the attestation evidence. */
+  vmConfig?: string
   note?: string
 }
 
 const DEFAULT_DSTACK_SOCK = '/var/run/dstack.sock'
 
-/** Fetch a quote from the dstack guest agent over its unix socket. */
-function fetchDstackQuote(
+/** Fetch quote evidence through the official dstack guest-agent SDK. */
+async function fetchDstackQuote(
   socketPath: string,
   reportDataHex: string,
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const req = http.request(
-      {
-        socketPath,
-        path: `/GetQuote?report_data=${reportDataHex}`,
-        method: 'GET',
-        timeout: 5000,
-      },
-      (res) => {
-        const chunks: Buffer[] = []
-        res.on('data', (c: Buffer) => chunks.push(c))
-        res.on('end', () => {
-          try {
-            const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-            if (typeof body.quote === 'string') resolve(body.quote)
-            else reject(new Error('dstack response missing quote'))
-          } catch (err) {
-            reject(err instanceof Error ? err : new Error(String(err)))
-          }
-        })
-      },
-    )
-    req.on('error', reject)
-    req.on('timeout', () => req.destroy(new Error('dstack quote timeout')))
-    req.end()
-  })
+): Promise<{ quote: string; eventLog: string; vmConfig?: string }> {
+  const result = await new DstackClient(socketPath).getQuote(
+    Buffer.from(reportDataHex, 'hex'),
+  )
+  if (typeof result.quote !== 'string' || result.quote.length === 0) {
+    throw new Error('dstack response missing quote')
+  }
+  if (typeof result.event_log !== 'string' || result.event_log.length === 0) {
+    throw new Error('dstack response missing event log')
+  }
+  return {
+    quote: result.quote,
+    eventLog: result.event_log,
+    vmConfig: result.vm_config,
+  }
 }
 
 export async function getAttestation(opts: {
   reportDataHex: string
   dstackSockPath?: string
+  /** Production fail-closed mode: never downgrade to `mode: dev`. */
+  requireTee?: boolean
 }): Promise<AttestationResult> {
   const sockPath = opts.dstackSockPath ?? DEFAULT_DSTACK_SOCK
   if (fs.existsSync(sockPath)) {
     try {
-      const quote = await fetchDstackQuote(sockPath, opts.reportDataHex)
-      return { mode: 'dstack', reportData: opts.reportDataHex, quote }
+      const evidence = await fetchDstackQuote(sockPath, opts.reportDataHex)
+      return {
+        mode: 'dstack',
+        reportData: opts.reportDataHex,
+        quote: evidence.quote,
+        eventLog: evidence.eventLog,
+        vmConfig: evidence.vmConfig,
+      }
     } catch (err) {
+      const message = `dstack socket present but quote failed: ${err instanceof Error ? err.message : String(err)}`
+      if (opts.requireTee) throw new Error(message)
       return {
         mode: 'dev',
         reportData: opts.reportDataHex,
         quote: null,
-        note: `dstack socket present but quote failed: ${err instanceof Error ? err.message : String(err)}`,
+        note: message,
       }
     }
   }
+  const message = 'no TEE guest agent found — running unattested (dev mode)'
+  if (opts.requireTee) throw new Error(message)
   return {
     mode: 'dev',
     reportData: opts.reportDataHex,
     quote: null,
-    note: 'no TEE guest agent found — running unattested (dev mode)',
+    note: message,
   }
 }

@@ -1,15 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import Database from 'better-sqlite3'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { SignerStore } from '../store.js'
+import { SqliteWalletStateRepository } from '../store.js'
+import { emptyState, sealState, unsealState } from '../state.js'
 
+const seed = Buffer.alloc(32, 41)
+const did = 'did:plc:storetest'
 let dir: string
-let store: SignerStore
+let dbPath: string
+let store: SqliteWalletStateRepository
 
 beforeEach(() => {
-  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'epds-signer-test-'))
-  store = new SignerStore(path.join(dir, 'signer.sqlite'))
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wallet-state-test-'))
+  dbPath = path.join(dir, 'wallet.sqlite')
+  store = new SqliteWalletStateRepository(dbPath, { rootSeed: seed })
 })
 
 afterEach(() => {
@@ -17,217 +23,196 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-describe('SignerStore.enroll', () => {
-  it('is trust-on-first-use', () => {
-    expect(store.enroll('did:plc:a', '02aa')).toBe('created')
-    expect(store.getEnrollment('did:plc:a')?.requestPubkeyHex).toBe('02aa')
+function sealed(version: number) {
+  const state = emptyState(did, 1)
+  state.stateVersion = version
+  return sealState(seed, state)
+}
+
+describe('SqliteWalletStateRepository CAS', () => {
+  it('creates and loads opaque sealed state', async () => {
+    expect(await store.load(did)).toBeNull()
+    expect(await store.create(did, sealed(1))).toBe('created')
+    expect(await store.create(did, sealed(2))).toBe('exists')
+    const snapshot = await store.load(did)
+    expect(snapshot?.revision).toBe('1')
+    expect(unsealState(seed, did, snapshot!.sealed).stateVersion).toBe(1)
   })
 
-  it('is idempotent for the same key', () => {
-    store.enroll('did:plc:a', '02aa')
-    expect(store.enroll('did:plc:a', '02aa')).toBe('unchanged')
+  it('updates only the expected revision', async () => {
+    await store.create(did, sealed(1))
+    expect(await store.compareAndSwap(did, '1', sealed(2))).toBe('updated')
+    expect(await store.compareAndSwap(did, '1', sealed(3))).toBe('conflict')
+    const snapshot = await store.load(did)
+    expect(snapshot?.revision).toBe('2')
+    expect(unsealState(seed, did, snapshot!.sealed).stateVersion).toBe(2)
   })
 
-  it('refuses to overwrite with a different key', () => {
-    store.enroll('did:plc:a', '02aa')
-    expect(store.enroll('did:plc:a', '03bb')).toBe('conflict')
-    expect(store.getEnrollment('did:plc:a')?.requestPubkeyHex).toBe('02aa')
+  it('distinguishes missing records and invalid revisions', async () => {
+    expect(await store.compareAndSwap(did, '1', sealed(1))).toBe('missing')
+    await store.create(did, sealed(1))
+    expect(await store.compareAndSwap(did, 'garbage', sealed(2))).toBe(
+      'conflict',
+    )
   })
 
-  it('keeps DIDs independent', () => {
-    store.enroll('did:plc:a', '02aa')
-    expect(store.enroll('did:plc:b', '03bb')).toBe('created')
+  it('allows one winner for competing CAS writes', async () => {
+    await store.create(did, sealed(1))
+    const [a, b] = await Promise.all([
+      store.compareAndSwap(did, '1', sealed(2)),
+      store.compareAndSwap(did, '1', sealed(3)),
+    ])
+    expect([a, b].sort()).toEqual(['conflict', 'updated'])
   })
 })
 
-describe('SignerStore.rotateEnrollment', () => {
-  it('replaces the enrolled key', () => {
-    store.enroll('did:plc:a', '02aa')
-    store.rotateEnrollment('did:plc:a', '03bb')
-    expect(store.getEnrollment('did:plc:a')?.requestPubkeyHex).toBe('03bb')
-  })
-
-  it('creates the row when none exists', () => {
-    store.rotateEnrollment('did:plc:a', '03bb')
-    expect(store.getEnrollment('did:plc:a')?.requestPubkeyHex).toBe('03bb')
-  })
-})
-
-describe('SignerStore wallet records', () => {
-  const row = {
-    did: 'did:plc:a',
-    serverShareCipherHex: 'aabb',
-    evmPubkeyHex: '02cc',
-    evmAddress: '0xAbC',
-    solPubkeyHex: 'dd',
-    solAddress: 'SoL',
-  }
-
-  it('creates and reads a wallet', () => {
-    expect(store.getWallet('did:plc:a')).toBeNull()
-    expect(store.createWallet(row)).toBe(true)
-    const got = store.getWallet('did:plc:a')
-    expect(got).toMatchObject({ ...row, version: 1 })
-    expect(got?.createdAt).toBeGreaterThan(0)
-  })
-
-  it('refuses to create twice', () => {
-    expect(store.createWallet(row)).toBe(true)
-    expect(store.createWallet(row)).toBe(false)
-    expect(store.createWallet({ ...row, serverShareCipherHex: 'ffff' })).toBe(
-      false,
-    )
-    expect(store.getWallet('did:plc:a')?.serverShareCipherHex).toBe('aabb')
-  })
-
-  it('replaceServerShare bumps the version', () => {
-    store.createWallet(row)
-    expect(store.replaceServerShare('did:plc:a', 'ccdd')).toBe(2)
-    expect(store.replaceServerShare('did:plc:a', 'eeff')).toBe(3)
-    const got = store.getWallet('did:plc:a')
-    expect(got?.serverShareCipherHex).toBe('eeff')
-    expect(got?.version).toBe(3)
-  })
-
-  it('replaceServerShare throws for a missing wallet', () => {
-    expect(() => store.replaceServerShare('did:plc:none', 'ff')).toThrow(
-      /no wallet/,
-    )
-  })
-})
-
-describe('SignerStore pregenerated wallets (defer-split)', () => {
-  const pregen = {
-    did: 'did:plc:a',
-    entropyCipherHex: 'eecc',
-    evmPubkeyHex: '02cc',
-    evmAddress: '0xAbC',
-    solPubkeyHex: 'dd',
-    solAddress: 'SoL',
-  }
-  const walletRow = {
-    did: 'did:plc:a',
-    serverShareCipherHex: 'aabb',
-    evmPubkeyHex: '02cc',
-    evmAddress: '0xAbC',
-    solPubkeyHex: 'dd',
-    solAddress: 'SoL',
-  }
-
-  it('creates and reads a pregen record', () => {
-    expect(store.getPregen('did:plc:a')).toBeNull()
-    expect(store.createPregen(pregen)).toBe(true)
-    const got = store.getPregen('did:plc:a')
-    expect(got).toMatchObject(pregen)
-    expect(got?.createdAt).toBeGreaterThan(0)
-  })
-
-  it('refuses to pregenerate twice', () => {
-    expect(store.createPregen(pregen)).toBe(true)
-    expect(store.createPregen({ ...pregen, entropyCipherHex: 'ffff' })).toBe(
-      false,
-    )
-    expect(store.getPregen('did:plc:a')?.entropyCipherHex).toBe('eecc')
-  })
-
-  it('claimPregen inserts the wallet and deletes the pregen row atomically', () => {
-    store.createPregen(pregen)
-    expect(store.claimPregen('did:plc:a', walletRow)).toBe(true)
-    expect(store.getWallet('did:plc:a')).toMatchObject({
-      ...walletRow,
-      version: 1,
+describe('SQLite durability and fencing', () => {
+  it('runs WAL with synchronous=FULL and an exclusive lock', () => {
+    expect(store.durabilityInfo()).toEqual({
+      journalMode: 'wal',
+      synchronous: 2,
+      lockingMode: 'exclusive',
     })
-    // The whole-entropy blob is gone — the custody window is closed.
-    expect(store.getPregen('did:plc:a')).toBeNull()
   })
 
-  it('claimPregen refuses when a wallet already exists, keeping the pregen row', () => {
-    store.createPregen(pregen)
-    store.createWallet(walletRow)
-    expect(store.claimPregen('did:plc:a', walletRow)).toBe(false)
-    expect(store.getPregen('did:plc:a')).not.toBeNull()
-  })
-
-  it('keeps pregen records independent of wallet records per DID', () => {
-    store.createPregen(pregen)
-    expect(store.createWallet({ ...walletRow, did: 'did:plc:b' })).toBe(true)
-    expect(store.getPregen('did:plc:b')).toBeNull()
-    expect(store.getPregen('did:plc:a')).not.toBeNull()
-  })
-})
-
-describe('SignerStore.consumeNonce', () => {
-  it('accepts strictly increasing nonces', () => {
-    expect(store.consumeNonce('did:plc:a', 1)).toBe(true)
-    expect(store.consumeNonce('did:plc:a', 2)).toBe(true)
-    expect(store.consumeNonce('did:plc:a', 10)).toBe(true)
-  })
-
-  it('rejects replays and reordering', () => {
-    expect(store.consumeNonce('did:plc:a', 5)).toBe(true)
-    expect(store.consumeNonce('did:plc:a', 5)).toBe(false)
-    expect(store.consumeNonce('did:plc:a', 4)).toBe(false)
-  })
-
-  it('tracks nonces per DID', () => {
-    expect(store.consumeNonce('did:plc:a', 5)).toBe(true)
-    expect(store.consumeNonce('did:plc:b', 5)).toBe(true)
-  })
-})
-
-describe('SignerStore durability & single-writer (spot hardening)', () => {
-  it('runs WAL with synchronous=FULL and an exclusive lock by default', () => {
-    const info = store.durabilityInfo()
-    expect(info.journalMode).toBe('wal')
-    expect(info.synchronous).toBe(2) // FULL — nonce commits survive preemption
-    expect(info.lockingMode).toBe('exclusive')
-  })
-
-  it('a second instance on the same file fails fast at startup', () => {
-    // `store` (beforeEach) already holds the exclusive lock on the
-    // durable-disk database — a failover replacement attaching the same
-    // disk while we are alive must refuse to start.
+  it('a second exclusive instance fails fast', () => {
     expect(
       () =>
-        new SignerStore(path.join(dir, 'signer.sqlite'), {
+        new SqliteWalletStateRepository(dbPath, {
+          rootSeed: seed,
           busyTimeoutMs: 100,
         }),
     ).toThrow(/database is locked/)
   })
 
-  it('allows shared connections when exclusive mode is disabled', () => {
-    const p = path.join(dir, 'shared.sqlite')
-    const a = new SignerStore(p, { exclusive: false })
-    const b = new SignerStore(p, { exclusive: false, busyTimeoutMs: 100 })
+  it('shared adapters still enforce CAS', async () => {
+    const sharedPath = path.join(dir, 'shared.sqlite')
+    const a = new SqliteWalletStateRepository(sharedPath, {
+      rootSeed: seed,
+      exclusive: false,
+    })
+    const b = new SqliteWalletStateRepository(sharedPath, {
+      rootSeed: seed,
+      exclusive: false,
+    })
     try {
-      a.enroll('did:plc:shared', '02aa')
-      expect(b.getEnrollment('did:plc:shared')?.requestPubkeyHex).toBe('02aa')
-      expect(a.durabilityInfo().lockingMode).toBe('normal')
+      await a.create(did, sealed(1))
+      const snap = await b.load(did)
+      expect(snap?.revision).toBe('1')
+      expect(await a.compareAndSwap(did, '1', sealed(2))).toBe('updated')
+      expect(await b.compareAndSwap(did, '1', sealed(3))).toBe('conflict')
     } finally {
       a.close()
       b.close()
     }
   })
 
-  it('close() leaves a fully checkpointed database behind', () => {
-    const p = path.join(dir, 'ckpt.sqlite')
-    const s = new SignerStore(p)
-    s.enroll('did:plc:ckpt', '02aa')
-    s.consumeNonce('did:plc:ckpt', 1)
-    s.close()
-    // After a controlled shutdown the WAL must be flushed into the main
-    // file so the durable disk can be detached and re-attached cleanly.
-    const wal = `${p}-wal`
+  it('controlled close checkpoints committed state', async () => {
+    await store.create(did, sealed(1))
+    store.close()
+    const wal = `${dbPath}-wal`
     if (fs.existsSync(wal)) expect(fs.statSync(wal).size).toBe(0)
-    const reopened = new SignerStore(p)
+    store = new SqliteWalletStateRepository(dbPath, { rootSeed: seed })
+    expect((await store.load(did))?.revision).toBe('1')
+  })
+})
+
+describe('legacy aggregate migration', () => {
+  it('atomically moves enrollment, nonce, wallet, and pregen rows into sealed V2 state', async () => {
+    store.close()
+    const db = new Database(dbPath)
+    db.exec(`
+      CREATE TABLE wallet_enrollment (
+        did TEXT PRIMARY KEY, request_pubkey_hex TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE wallet_nonce (
+        did TEXT PRIMARY KEY, last_nonce INTEGER NOT NULL
+      );
+      CREATE TABLE wallet (
+        did TEXT PRIMARY KEY, server_share_cipher_hex TEXT NOT NULL,
+        evm_pubkey_hex TEXT NOT NULL, evm_address TEXT NOT NULL,
+        sol_pubkey_hex TEXT NOT NULL, sol_address TEXT NOT NULL,
+        version INTEGER NOT NULL, created_at INTEGER NOT NULL
+      );
+      CREATE TABLE wallet_pregen (
+        did TEXT PRIMARY KEY, entropy_cipher_hex TEXT NOT NULL,
+        evm_pubkey_hex TEXT NOT NULL, evm_address TEXT NOT NULL,
+        sol_pubkey_hex TEXT NOT NULL, sol_address TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `)
+    db.prepare('INSERT INTO wallet_enrollment VALUES (?, ?, ?)').run(
+      did,
+      '02aa',
+      100,
+    )
+    db.prepare('INSERT INTO wallet_nonce VALUES (?, ?)').run(did, 17)
+    db.prepare('INSERT INTO wallet VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      did,
+      'aabb',
+      '02cc',
+      '0xabc',
+      'dd',
+      'sol',
+      3,
+      101,
+    )
+    const pregenDid = 'did:plc:legacypregen'
+    db.prepare('INSERT INTO wallet_pregen VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+      pregenDid,
+      'eeff',
+      '02ff',
+      '0xdef',
+      'aa',
+      'sol2',
+      102,
+    )
+    db.close()
+
+    store = new SqliteWalletStateRepository(dbPath, {
+      rootSeed: seed,
+      keyEpoch: 2,
+    })
+    const walletState = unsealState(seed, did, (await store.load(did))!.sealed)
+    expect(walletState).toMatchObject({
+      schema: 2,
+      keyEpoch: 2,
+      stateVersion: 1,
+      lastNonce: 17,
+      enrollment: { requestPubkeyHex: '02aa', createdAt: 100 },
+      wallet: {
+        shareSetVersion: 3,
+        serverShareCipherHex: 'aabb',
+      },
+    })
+    const pregenState = unsealState(
+      seed,
+      pregenDid,
+      (await store.load(pregenDid))!.sealed,
+    )
+    expect(pregenState.pregen?.entropyCipherHex).toBe('eeff')
+
+    store.close()
+    const check = new Database(dbPath, { readonly: true })
     try {
-      expect(reopened.getEnrollment('did:plc:ckpt')?.requestPubkeyHex).toBe(
-        '02aa',
-      )
-      // The consumed nonce survived — no replay window re-opened.
-      expect(reopened.consumeNonce('did:plc:ckpt', 1)).toBe(false)
+      expect(
+        (
+          check.prepare('SELECT count(*) AS n FROM wallet').get() as {
+            n: number
+          }
+        ).n,
+      ).toBe(0)
+      expect(
+        (
+          check.prepare('SELECT count(*) AS n FROM wallet_pregen').get() as {
+            n: number
+          }
+        ).n,
+      ).toBe(0)
     } finally {
-      reopened.close()
+      check.close()
     }
+    store = new SqliteWalletStateRepository(dbPath, { rootSeed: seed })
   })
 })

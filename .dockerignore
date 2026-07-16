@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+dist
+data
+coverage
+*.tsbuildinfo
+AGENTS.md
+README.md
+docs
+src/__tests__

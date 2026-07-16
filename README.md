@@ -1,17 +1,20 @@
 # atproto-wallet-service
 
 > [!WARNING]
-> **Work in progress.** This code is experimental. It is not deployed and
-> not audited, and the APIs and record schemas will change. Do not put real
-> funds behind it.
+> **Work in progress.** This code is experimental, deployed only as an
+> unattested demo, and not audited. The current deployment uses a file-based
+> root seed that a VM administrator can access; it is not operator-proof.
+> APIs and record schemas will change. Do not put real funds behind it.
 
 A standalone, TEE-hosted embedded-wallet service for AT Protocol users on
 any PDS, including Bluesky-hosted accounts. Every user gets a self-custodial
 wallet (Ethereum-compatible + Solana) keyed to their DID. There is no seed
 phrase to manage: keys are held as 2-of-3 Shamir shares (device,
 server-in-TEE, recovery), and only requests signed on the user's own device
-can spend. The operator can never sign, trap, or drain funds on their own,
-and users can always export their keys and leave.
+can spend. The target attested architecture prevents the operator from
+signing alone and lets users export their keys and leave. The current demo
+does **not** yet establish that guarantee; see
+[Stateless TEE architecture review](docs/stateless-tee-design.md).
 
 ## How it works on the protocol
 
@@ -39,15 +42,22 @@ Three mechanisms, all standard ATProto or W3C DID machinery:
 
 ## API surface
 
-| Tier     | Auth                 | Endpoints                                                                                       |
-| -------- | -------------------- | ----------------------------------------------------------------------------------------------- |
-| user     | service-auth JWT     | `POST /v1/wallet/enroll`, `POST /v1/wallet/create`, `GET /v1/wallet/info/:did`                  |
-| envelope | user-signed envelope | `POST /v1/wallet/sign`, `POST /v1/wallet/export`, `POST /v1/wallet/recover`                     |
-| admin    | `x-internal-secret`  | `POST /v1/wallet/pregenerate`, `GET /v1/wallet/enrollment/:did`                                 |
-| open     | none                 | `GET /v1/wallet/public/:did`, `GET /v1/attestation`, `GET /health`, `GET /.well-known/did.json` |
+| Tier     | Auth                 | Endpoints                                                                                                     |
+| -------- | -------------------- | ------------------------------------------------------------------------------------------------------------- |
+| user     | service-auth JWT     | `POST /v1/wallet/enroll`, `POST /v1/wallet/create`, `GET /v1/wallet/info/:did`                                |
+| envelope | user-signed envelope | `POST /v1/wallet/sign`, `POST /v1/wallet/export`, `POST /v1/wallet/recover`, `POST /v1/wallet/recover-export` |
+| admin    | `x-internal-secret`  | `POST /v1/wallet/pregenerate`, `GET /v1/wallet/enrollment/:did`                                               |
+| open     | none                 | `GET /v1/wallet/public/:did`, `GET /v1/attestation`, `GET /health`, `GET /.well-known/did.json`               |
 
 Pregenerated wallets are receive-only and enclave-custodial until the DID's
 first `create` after enrollment claims them (defer-split, atomic claim).
+
+Every create, sign, export, and recovery request carries a random `requestId`
+(8–128 base64url characters). Its exact response is stored as an encrypted
+operation receipt in the same state transition. Retrying the same authenticated
+request returns that receipt; reusing the ID with different parameters is
+rejected. Envelope payloads may additionally carry `stateVersion` and
+`shareSetVersion` to reject operations prepared against stale state.
 
 ## Dev
 
@@ -66,8 +76,8 @@ quote.
 
 ## Spot instances / controlled failover
 
-The service is hardened to run on preemptible TDX instances (e.g. GCP
-spot) with an **external dstack KMS** and a **durable data disk**
+The current stateful implementation is hardened to run on preemptible TDX
+instances (e.g. GCP spot) with an **external dstack KMS** and a **durable data disk**
 (pd-balanced) that is re-attached to the replacement instance:
 
 - **Root seed off the host** — `WALLET_SERVICE_ROOT_SEED_SOURCE=dstack-kms`
@@ -75,10 +85,11 @@ spot) with an **external dstack KMS** and a **durable data disk**
   every boot (`src/dstack-kms.ts`). The KMS binds the key to the measured
   app image, so a re-created instance derives the _same_ seed; nothing
   secret lives on the disposable boot disk.
-- **Durable nonce state** — the sqlite store runs WAL with
-  `synchronous=FULL`, so a committed nonce survives sudden power-off
-  (preemption) and no envelope-replay window re-opens. `close()`
-  checkpoints the WAL so the data disk detaches clean.
+- **Atomic sealed state** — enrollment, nonce, wallet/share-set version,
+  pregen state, and idempotency receipts are one per-DID AES-GCM-sealed V2
+  aggregate. The async repository uses revision CAS, so nonce consumption,
+  re-sharding, request-key rotation, and delivery receipts commit together.
+  SQLite runs WAL with `synchronous=FULL`; `close()` checkpoints the WAL.
 - **Single writer enforced** — the store holds SQLite's EXCLUSIVE lock for
   its lifetime; a second instance attaching the same data disk fails fast
   at startup instead of splitting the monotonic nonce state.
@@ -92,6 +103,13 @@ spot) with an **external dstack KMS** and a **durable data disk**
 
 ## Known gaps / next steps
 
+- [ ] Replace the SQLite repository adapter with strongly-consistent external
+      CAS storage, then deploy the measured stateless design in
+      [docs/stateless-tee-design.md](docs/stateless-tee-design.md). The per-DID
+      sealed aggregate, async repository seam, atomic CAS transitions,
+      idempotent receipts, production seed guard, and attestation fail-closed
+      guard are implemented. Still needed: external storage, measured workload
+      governance, client verification, and an independent monotonic witness.
 - [ ] Enrollment TOFU gap: a malicious PDS operator can mint a service-auth
       token for a never-enrolled user and register their own request key
       first. Fix: WebAuthn/passkey attestation as an operator-independent
