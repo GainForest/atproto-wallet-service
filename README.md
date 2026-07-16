@@ -1,8 +1,8 @@
 # atproto-wallet-service
 
 > [!WARNING]
-> **Private work-in-progress.** Experimental extraction — not deployed,
-> not audited, APIs and record schemas will change. Do not put real funds
+> **Work-in-progress.** Experimental extraction — not deployed, not
+> audited, APIs and record schemas will change. Do not put real funds
 > behind it.
 
 A **standalone, TEE-hosted embedded-wallet service for AT Protocol users on
