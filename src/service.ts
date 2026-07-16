@@ -59,6 +59,7 @@ import { timingSafeEqual, createLogger } from './lib/shared.js'
 import type { VerifyServiceJwt } from './auth/service-auth.js'
 import { getAttestation, type AttestationResult } from './attestation.js'
 import { deriveIdentityPublicKey } from './derive.js'
+import { buildDidWebDocument } from './did-web.js'
 import {
   DEFAULT_FRESHNESS_SEC,
   verifyEnvelope,
@@ -108,6 +109,12 @@ export interface SignerServiceOptions {
    * complete; new traffic is steered away.
    */
   isDraining?: () => boolean
+  /**
+   * The service's own DID (aud of every accepted service-auth JWT).
+   * When it is a bare-domain did:web, /.well-known/did.json is served,
+   * binding the DID to the identity key and HTTPS endpoint.
+   */
+  serviceDid?: string
 }
 
 /** lxm values — the lexicon method each service-auth token must target. */
@@ -214,6 +221,16 @@ export function createSignerApp(opts: SignerServiceOptions): Application {
     }
     res.json({ status: 'ok', service: 'atproto-wallet-service' })
   })
+
+  // did:web resolution — bind SERVICE_DID to this deployment's identity
+  // key and endpoint. Built once at startup; fails loud on a malformed
+  // did:web rather than serving a document that misrepresents the DID.
+  if (opts.serviceDid?.startsWith('did:web:')) {
+    const didDoc = buildDidWebDocument(opts.serviceDid, identityPubkeyHex)
+    app.get('/.well-known/did.json', (_req, res) => {
+      res.json(didDoc)
+    })
+  }
 
   app.get('/v1/attestation', async (_req, res) => {
     let attestation: AttestationResult

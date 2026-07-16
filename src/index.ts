@@ -109,6 +109,7 @@ async function main(): Promise<void> {
       : undefined,
     dstackSockPath: process.env.WALLET_SERVICE_DSTACK_SOCK,
     isDraining: () => draining,
+    serviceDid,
   })
 
   const server = app.listen(port, () => {

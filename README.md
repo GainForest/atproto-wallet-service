@@ -39,12 +39,12 @@ Three mechanisms, all standard ATProto or W3C DID machinery:
 
 ## API surface
 
-| Tier     | Auth                 | Endpoints                                                                      |
-| -------- | -------------------- | ------------------------------------------------------------------------------ |
-| user     | service-auth JWT     | `POST /v1/wallet/enroll`, `POST /v1/wallet/create`, `GET /v1/wallet/info/:did` |
-| envelope | user-signed envelope | `POST /v1/wallet/sign`, `POST /v1/wallet/export`, `POST /v1/wallet/recover`    |
-| admin    | `x-internal-secret`  | `POST /v1/wallet/pregenerate`, `GET /v1/wallet/enrollment/:did`                |
-| open     | none                 | `GET /v1/wallet/public/:did`, `GET /v1/attestation`, `GET /health`             |
+| Tier     | Auth                 | Endpoints                                                                                       |
+| -------- | -------------------- | ----------------------------------------------------------------------------------------------- |
+| user     | service-auth JWT     | `POST /v1/wallet/enroll`, `POST /v1/wallet/create`, `GET /v1/wallet/info/:did`                  |
+| envelope | user-signed envelope | `POST /v1/wallet/sign`, `POST /v1/wallet/export`, `POST /v1/wallet/recover`                     |
+| admin    | `x-internal-secret`  | `POST /v1/wallet/pregenerate`, `GET /v1/wallet/enrollment/:did`                                 |
+| open     | none                 | `GET /v1/wallet/public/:did`, `GET /v1/attestation`, `GET /health`, `GET /.well-known/did.json` |
 
 Pregenerated wallets are receive-only and enclave-custodial until the DID's
 first `create` after enrollment claims them (defer-split, atomic claim).
@@ -103,7 +103,6 @@ spot) with an **external dstack KMS** and a **durable data disk**
       `synchronous=FULL` closes the crash-loss case; a malicious host
       restoring an old disk snapshot still needs an external anchor.
 - [ ] XRPC-shaped aliases (`/xrpc/app.gainforest.wallet.*`).
-- [ ] did:web document + `/.well-known/did.json` serving for `SERVICE_DID`.
 - [ ] Rate limiting is in-memory and per-instance only.
 
 ## License

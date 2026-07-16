@@ -44,6 +44,7 @@ Needs Node >= 20 and a `.env` (copy `.env.example`; set
 | `src/preemption.ts`        | GCP spot preemption watcher → controlled shutdown              |
 | `src/store.ts`             | better-sqlite3 persistence                                     |
 | `src/binding.ts`           | Canonical wallet↔DID binding message + signature               |
+| `src/did-web.ts`           | did:web document for SERVICE_DID (/.well-known/did.json)       |
 | `src/attestation.ts`       | TEE attestation quote endpoint support                         |
 | `src/purposes.ts`          | Domain-separated derivation purposes                           |
 | `lexicons/`                | `app.gainforest.wallet.binding` lexicon                        |

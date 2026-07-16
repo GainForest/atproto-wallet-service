@@ -868,3 +868,81 @@ describe('draining /health (controlled shutdown & failover)', () => {
     }
   })
 })
+
+describe('GET /.well-known/did.json (did:web resolution)', () => {
+  async function appOn(serviceDid?: string): Promise<{
+    srv: Server
+    base: string
+    store: SignerStore
+  }> {
+    const s = new SignerStore(':memory:')
+    const app = createSignerApp({
+      rootSeed: seed,
+      store: s,
+      internalSecret: SECRET,
+      verifyServiceJwt: fakeVerifyServiceJwt,
+      serviceDid,
+    })
+    const srv = await new Promise<Server>((resolve) => {
+      const x = app.listen(0, () => resolve(x))
+    })
+    const addr = srv.address()
+    const b =
+      typeof addr === 'object' && addr ? `http://127.0.0.1:${addr.port}` : ''
+    return { srv, base: b, store: s }
+  }
+
+  it('serves a DID document binding identity key and endpoint', async () => {
+    const { srv, base: b, store: s } = await appOn('did:web:wallet.test.dev')
+    try {
+      const res = await fetch(`${b}/.well-known/did.json`)
+      expect(res.status).toBe(200)
+      const doc = await res.json()
+      expect(doc.id).toBe('did:web:wallet.test.dev')
+      expect(doc.verificationMethod[0].type).toBe('Multikey')
+      expect(doc.service[0].serviceEndpoint).toBe('https://wallet.test.dev')
+
+      // The published key must be THIS instance's identity key — the
+      // one whose hash is bound into the attestation report data.
+      const att = await (await fetch(`${b}/v1/attestation`)).json()
+      const mb = doc.verificationMethod[0].publicKeyMultibase
+      const { parseMultikey } = await import('@atproto/crypto')
+      const compressed = Buffer.from(
+        secp256k1.Point.fromHex(
+          Buffer.from(parseMultikey(mb).keyBytes).toString('hex'),
+        ).toBytes(true),
+      ).toString('hex')
+      expect(compressed).toBe(att.identityPublicKeyHex)
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()))
+      s.close()
+    }
+  })
+
+  it('404s when the service DID is not did:web', async () => {
+    const { srv, base: b, store: s } = await appOn('did:plc:notweb123')
+    try {
+      expect((await fetch(`${b}/.well-known/did.json`)).status).toBe(404)
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()))
+      s.close()
+    }
+  })
+
+  it('fails loud at startup for a path-based did:web', () => {
+    const s = new SignerStore(':memory:')
+    try {
+      expect(() =>
+        createSignerApp({
+          rootSeed: seed,
+          store: s,
+          internalSecret: SECRET,
+          verifyServiceJwt: fakeVerifyServiceJwt,
+          serviceDid: 'did:web:example.com:u:alice',
+        }),
+      ).toThrow(/bare-domain/)
+    } finally {
+      s.close()
+    }
+  })
+})
