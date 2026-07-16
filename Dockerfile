@@ -4,7 +4,7 @@
 # digest, so the bytes here ARE the trust boundary — keep the build
 # deterministic: pinned base images, frozen lockfile, no dev deps.
 
-FROM node:22.21.1-bookworm-slim AS build
+FROM node:22.21.1-bookworm-slim@sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c AS build
 WORKDIR /app
 RUN corepack enable
 # better-sqlite3 needs a compiler toolchain at install time.
@@ -20,7 +20,7 @@ RUN pnpm build
 # Prune to production dependencies only.
 RUN pnpm prune --prod
 
-FROM node:22.21.1-bookworm-slim
+FROM node:22.21.1-bookworm-slim@sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build /app/node_modules ./node_modules
