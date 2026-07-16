@@ -1,0 +1,22 @@
+# Independent verifier for full dstack GCP evidence (TDX + vTPM + event log + OS).
+FROM rust:1.92.0@sha256:48851a839d6a67370c9dbe0e709bedc138e3e404b161c5233aedcf2b717366e4 AS build
+ARG DSTACK_REV=b051018a97e9a51748cb493d8139f624a2e68f54
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  git build-essential musl-tools libssl-dev protobuf-compiler \
+  libprotobuf-dev clang libclang-dev ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+RUN git clone --filter=blob:none https://github.com/Phala-Network/dstack-cloud.git /src \
+  && cd /src && git fetch --depth 1 origin ${DSTACK_REV} \
+  && git checkout ${DSTACK_REV}
+RUN rustup target add x86_64-unknown-linux-musl \
+  && cd /src && cargo build --release -p dstack-verifier \
+       --target x86_64-unknown-linux-musl
+
+FROM debian:bookworm-slim@sha256:0d8498a0e9e6a60011df39aab78534cfe940785e7c59d19dfae1eb53ea59babe
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/x86_64-unknown-linux-musl/release/dstack-verifier /usr/local/bin/dstack-verifier
+USER 65532:65532
+ENV DSTACK_VERIFIER_ADDRESS=0.0.0.0 DSTACK_VERIFIER_PORT=8080
+EXPOSE 8080
+ENTRYPOINT ["dstack-verifier"]

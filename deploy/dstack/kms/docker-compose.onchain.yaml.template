@@ -1,0 +1,72 @@
+# Measured KMS CVM with on-chain authorization. Render every @...@
+# placeholder to a literal value before dstack-cloud prepare/deploy so the
+# KMS measurement pins images, governance contract, RPC, and admin-token hash.
+services:
+  auth:
+    image: "@AUTH_IMAGE_DIGEST@"
+    restart: unless-stopped
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      ETH_RPC_URL: "@ETH_RPC_URL@"
+      KMS_CONTRACT_ADDR: "@KMS_CONTRACT_ADDR@"
+
+  kms:
+    image: "@KMS_IMAGE_DIGEST@"
+    restart: unless-stopped
+    user: "0"
+    depends_on:
+      - auth
+    volumes:
+      - kms-volume:/kms
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    ports:
+      - "12001:8000"
+    configs:
+      - source: kms_config
+        target: /kms-config/kms.toml
+    entrypoint: ["/bin/sh"]
+    command:
+      - "-c"
+      - "mkdir -p /kms/certs /kms/images && cp /kms-config/kms.toml /kms/kms.toml && exec dstack-kms -c /kms/kms.toml"
+
+volumes:
+  kms-volume:
+
+configs:
+  kms_config:
+    content: |
+      [rpc]
+      address = "0.0.0.0"
+      port = 8000
+
+      [rpc.tls]
+      key = "/kms/certs/rpc.key"
+      certs = "/kms/certs/rpc.crt"
+
+      [rpc.tls.mutual]
+      ca_certs = "/kms/certs/tmp-ca.crt"
+      mandatory = false
+
+      [core]
+      cert_dir = "/kms/certs"
+      admin_token_hash = "@ADMIN_TOKEN_HASH@"
+
+      [core.image]
+      verify = true
+      cache_dir = "/kms/images"
+      download_url = "@IMAGE_DOWNLOAD_URL@"
+      download_timeout = "5m"
+
+      [core.auth_api]
+      type = "webhook"
+
+      [core.auth_api.webhook]
+      url = "http://auth:8000"
+
+      [core.onboard]
+      enabled = true
+      auto_bootstrap_domain = ""
+      quote_enabled = true
+      address = "0.0.0.0"
+      port = 8000
