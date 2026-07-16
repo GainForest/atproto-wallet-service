@@ -88,6 +88,10 @@ export interface SignerServiceOptions {
   freshnessSec?: number
   stateKeyEpoch?: number
   dstackSockPath?: string
+  /** Unix socket of the root-owned configfs-TSM quote helper. */
+  tsmQuoteSockPath?: string
+  /** configfs-TSM report directory (direct mode, needs privileges). */
+  tsmReportDir?: string
   /** Production fail-closed attestation mode. */
   requireTeeAttestation?: boolean
   /** Number of explicitly trusted reverse-proxy hops (0 means direct). */
@@ -399,6 +403,8 @@ export function createSignerApp(opts: SignerServiceOptions): Application {
       const attestation: AttestationResult = await getAttestation({
         reportDataHex,
         dstackSockPath: opts.dstackSockPath,
+        tsmQuoteSockPath: opts.tsmQuoteSockPath,
+        tsmReportDir: opts.tsmReportDir,
         requireTee: opts.requireTeeAttestation,
       })
       res.json({

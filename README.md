@@ -74,6 +74,15 @@ Production must run inside a confidential VM
 root seed provisioned by the dstack KMS. `GET /v1/attestation` exposes the
 quote.
 
+On TDX CVMs without dstack (e.g. GCP confidential VMs on a stock guest
+image) the service falls back to Linux configfs-TSM quotes
+(`src/tsm-quote.ts`), either through the root-owned helper
+(`dist/tsm-quote-helper.js` on `/run/tdx-quote.sock`) or directly when
+privileged. The resulting `mode: "tdx-tsm"` proves genuine TDX hardware
+and the measured boot chain over the same challenge-bound report data,
+but — unlike a measured dstack workload — it does **not** prove the
+operator is locked out of the VM.
+
 ## Spot instances / controlled failover
 
 The current stateful implementation is hardened to run on preemptible TDX

@@ -46,6 +46,8 @@ Needs Node >= 20 and a `.env` (copy `.env.example`; set
 | `src/binding.ts`               | Canonical wallet↔DID binding message + signature               |
 | `src/did-web.ts`               | did:web document for SERVICE_DID (/.well-known/did.json)       |
 | `src/attestation.ts`           | TEE attestation quote endpoint support                         |
+| `src/tsm-quote.ts`             | configfs-TSM TDX quotes (GCP CVMs without dstack)              |
+| `src/tsm-quote-helper.ts`      | Root-owned quote helper on a local unix socket                 |
 | `src/purposes.ts`              | Domain-separated derivation purposes                           |
 | `lexicons/`                    | `app.gainforest.wallet.binding` lexicon                        |
 | `src/__tests__/`               | Vitest suites — one file per module                            |

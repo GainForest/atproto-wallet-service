@@ -125,6 +125,8 @@ async function main(): Promise<void> {
     await getAttestation({
       reportDataHex: '00'.repeat(32),
       dstackSockPath: process.env.WALLET_SERVICE_DSTACK_SOCK,
+      tsmQuoteSockPath: process.env.WALLET_SERVICE_TSM_QUOTE_SOCK,
+      tsmReportDir: process.env.WALLET_SERVICE_TSM_REPORT_DIR,
       requireTee: true,
     })
   }
@@ -149,6 +151,8 @@ async function main(): Promise<void> {
       : undefined,
     stateKeyEpoch,
     dstackSockPath: process.env.WALLET_SERVICE_DSTACK_SOCK,
+    tsmQuoteSockPath: process.env.WALLET_SERVICE_TSM_QUOTE_SOCK,
+    tsmReportDir: process.env.WALLET_SERVICE_TSM_REPORT_DIR,
     requireTeeAttestation: production,
     trustProxyHops,
     isDraining: () => draining,
