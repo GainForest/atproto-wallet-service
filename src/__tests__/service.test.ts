@@ -57,6 +57,7 @@ let base: string
 let enclaveJwk: JWK
 let deviceShare: Uint8Array
 let recoveryShare: Uint8Array
+let exportedEntropy: Uint8Array
 let evmPubkeyHex: string
 let solPubkeyHex: string
 
@@ -519,6 +520,7 @@ describe('wallet lifecycle (2-of-3 shares)', () => {
     ) as ExportJson
     expect(exported.mnemonic.split(' ')).toHaveLength(12)
     expect(exported.entropyHex).toMatch(/^[0-9a-f]{32}$/)
+    exportedEntropy = Uint8Array.from(Buffer.from(exported.entropyHex, 'hex'))
     expect(exported.evm.privateKeyHex).toMatch(/^[0-9a-f]{64}$/)
     // The exported key really is the wallet key.
     expect(
@@ -603,6 +605,27 @@ describe('wallet lifecycle (2-of-3 shares)', () => {
       { prehash: false },
     )
     expect(ok).toBe(true)
+  })
+
+  it('recovers a matching full-wallet export into fresh shares', async () => {
+    const mismatch = await post('/v1/wallet/recover-export', {
+      did,
+      entropyJwe: await encryptToEnclave(new Uint8Array(16)),
+      requestPublicKeyHex: userPubHex,
+    })
+    expect(mismatch.status).toBe(403)
+    expect(mismatch.json.error).toMatch(/does not match wallet/)
+
+    const res = await post('/v1/wallet/recover-export', {
+      did,
+      entropyJwe: await encryptToEnclave(exportedEntropy),
+      requestPublicKeyHex: userPubHex,
+    })
+    expect(res.status).toBe(200)
+    expect(res.json.status).toBe('recovered-from-export')
+    expect(res.json.version).toBe(3)
+    deviceShare = await decryptAsUser(res.json.deviceShareJwe as string)
+    recoveryShare = await decryptAsUser(res.json.recoveryShareJwe as string)
   })
 
   it('rejects recovery with a wrong share', async () => {

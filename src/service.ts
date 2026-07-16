@@ -27,6 +27,9 @@
  *       re-shards with fresh coefficients, optionally rotates the
  *       enrolled request key. Authorization is possession of a share
  *       that actually reconstructs this wallet — not the caller.
+ *     POST /v1/wallet/recover-export — restores a legacy full-wallet export;
+ *       encrypted entropy is verified against the registered wallet before
+ *       fresh device/recovery shares are issued.
  *
  *   ADMIN TIER (x-internal-secret — operator tooling only):
  *     POST /v1/wallet/pregenerate — defer-split provisioning for a DID
@@ -727,6 +730,83 @@ export function createSignerApp(opts: SignerServiceOptions): Application {
       wipe(
         recoveryShare,
         serverShare,
+        entropy,
+        keys?.evmPrivateKey,
+        keys?.solPrivateKey,
+        ...(newShares ?? []),
+      )
+    }
+  })
+
+  /**
+   * Legacy/full-export recovery. The browser sends only wallet entropy,
+   * JWE-encrypted to the enclave. Possession of entropy is the authorization;
+   * its derived public key must exactly match the registered wallet before the
+   * server share or enrollment is changed.
+   */
+  app.post('/v1/wallet/recover-export', writeLimiter, async (req, res) => {
+    const { did, entropyJwe, requestPublicKeyHex } = req.body ?? {}
+    if (!isPlausibleDid(did) || !isCompactJwe(entropyJwe)) {
+      res.status(400).json({ error: 'invalid did or entropyJwe' })
+      return
+    }
+    if (
+      !isCompressedP256Hex(requestPublicKeyHex) ||
+      !isValidP256PublicKeyHex(requestPublicKeyHex)
+    ) {
+      res.status(400).json({ error: 'invalid requestPublicKeyHex' })
+      return
+    }
+    const wallet = store.getWallet(did)
+    const enrollment = store.getEnrollment(did)
+    if (!wallet || !enrollment) {
+      res.status(403).json({ error: 'no wallet exists for this DID' })
+      return
+    }
+
+    let entropy: Uint8Array | undefined
+    let keys: WalletChainKeys | undefined
+    let newShares: [Uint8Array, Uint8Array, Uint8Array] | undefined
+    try {
+      try {
+        entropy = await decryptJweToEnclave(rootSeed, entropyJwe)
+        keys = deriveChainKeys(entropy)
+      } catch (err) {
+        logger.warn({ err, did }, 'wallet export recovery decryption failed')
+        res.status(403).json({ error: 'wallet export is invalid' })
+        return
+      }
+      if (bytesToHex(keys.evmPublicKey) !== wallet.evmPubkeyHex) {
+        res.status(403).json({ error: 'wallet export does not match wallet' })
+        return
+      }
+
+      newShares = await splitWalletEntropy(entropy)
+      const targetKeyHex = requestPublicKeyHex.toLowerCase()
+      const [deviceShareJwe, recoveryShareJwe] = await Promise.all([
+        encryptToRequestKey(targetKeyHex, newShares[1]),
+        encryptToRequestKey(targetKeyHex, newShares[2]),
+      ])
+      const version = store.replaceServerShare(
+        did,
+        encryptServerShare(shareKek, did, newShares[0]),
+      )
+      if (targetKeyHex !== enrollment.requestPubkeyHex) {
+        store.rotateEnrollment(did, targetKeyHex)
+        logger.info({ did }, 'request key rotated during export recovery')
+      }
+      logger.info({ did, version }, 'wallet recovered from export (re-sharded)')
+      res.json({
+        status: 'recovered-from-export',
+        version,
+        deviceShareJwe,
+        recoveryShareJwe,
+      })
+    } catch (err) {
+      logger.error({ err, did }, 'wallet export recovery failed')
+      res.status(500).json({ error: 'wallet export recovery failed' })
+    } finally {
+      wipe(
         entropy,
         keys?.evmPrivateKey,
         keys?.solPrivateKey,
