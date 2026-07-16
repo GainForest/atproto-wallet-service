@@ -1,0 +1,38 @@
+# Template for the measured dstack CVM compose. Render with
+# deploy/dstack/render-compose.sh, which substitutes the literal image
+# digest and hostname so the compose-hash (RTMR3) pins the exact code
+# and endpoint. Only the admin secret arrives via dstack encrypted env.
+services:
+  wallet:
+    image: "@IMAGE_DIGEST@"
+    restart: always
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - wallet-data:/data
+    environment:
+      NODE_ENV: production
+      WALLET_SERVICE_PORT: "3020"
+      WALLET_SERVICE_DATA_DIR: /data/wallet-service
+      WALLET_SERVICE_ROOT_SEED_SOURCE: dstack-kms
+      WALLET_SERVICE_KMS_KEY_PATH: wallet-service/root-seed
+      WALLET_SERVICE_TRUST_PROXY_HOPS: "1"
+      SERVICE_DID: "did:web:@WALLET_HOSTNAME@"
+      WALLET_SERVICE_ADMIN_SECRET: ${WALLET_SERVICE_ADMIN_SECRET}
+    expose:
+      - "3020"
+
+  caddy:
+    image: "@CADDY_DIGEST@"
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    command: caddy reverse-proxy --from https://@WALLET_HOSTNAME@ --to wallet:3020
+
+volumes:
+  wallet-data:
+  caddy-data:
+  caddy-config:

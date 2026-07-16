@@ -1,78 +1,68 @@
-# dstack production deployment
+# Measured dstack CVM deployment (GCP TDX)
 
-This directory defines the **new security epoch** selected for the wallet
-service. It does not reuse the unattested demo's file seed or SQLite volume.
-Do not point the public hostname here until every cutover check below passes.
+This directory holds the canonical assets for running the wallet
+service as a **measured dstack workload** on a GCP Intel TDX
+confidential VM, deployed with the
+[`dstack-cloud`](https://github.com/Phala-Network/meta-dstack-cloud)
+CLI. In this mode:
 
-## Security properties
+- the guest image is the pinned dstack OS image (no SSH, immutable,
+  measured into MRTD/RTMR0-2);
+- the app (this compose file, with **digest-pinned** images) is
+  measured into RTMR3 via the compose-hash;
+- the root seed comes from the dstack KMS
+  (`WALLET_SERVICE_ROOT_SEED_SOURCE=dstack-kms`), released only after
+  remote attestation — deterministic across CVM re-creation, never on
+  disk;
+- the admin secret arrives through the dstack encrypted-env channel,
+  decryptable only by the app-scoped KMS key inside the attested CVM;
+- TLS terminates inside the CVM (Caddy with a Let's Encrypt cert for
+  the sslip.io hostname of the reserved static IP).
 
-- Dedicated GCP Intel TDX CVM booted with dstack OS.
-- Separate self-hosted dstack KMS CVM.
-- Workload image referenced by OCI digest, never by a mutable tag.
-- Production startup fails unless KMS key derivation and TDX quote generation
-  both succeed through `/var/run/dstack.sock`.
-- The quote report data binds the service DID, protocol version, identity key,
-  and wallet-encryption JWK through `AttestationManifestV1`.
-- The old operator-readable root seed and wallet state are not imported.
+## Files
 
-This fixes the service-side quote generation. Production still requires a
-browser verifier that validates the quote, event log, accepted measurements,
-and manifest before using the wallet-encryption JWK.
+| File | Role |
+| --- | --- |
+| `docker-compose.yaml.template` | Measured compose; placeholders for digests + hostname |
+| `render-compose.sh` | Renders the template with literal digests (compose-hash pins code) |
 
-## 1. Release the workload image
+## Deploy outline (run on a Linux deploy host)
 
-Tag a reviewed commit. `.github/workflows/release-image.yml` builds an amd64
-image, emits SBOM/provenance, pushes it to GHCR, and signs its digest with
-GitHub OIDC.
+```bash
+# 1. Build + push the pinned image
+docker build -t $REGION-docker.pkg.dev/$PROJECT/$REPO/atproto-wallet-service:$GIT_SHA .
+docker push ...                      # note the sha256 digest
 
-Make the GHCR package public (or configure dstack registry credentials), verify
-its cosign identity, then replace `IMAGE_DIGEST_REQUIRED` in
-`docker-compose.yaml` with the released digest.
+# 2. dstack-cloud project
+dstack-cloud pull <dstack-cloud OS image tarballs>
+dstack-cloud new wallet-cvm --os-image dstack-cloud-X.Y.Z --instance-name <name>
+cd wallet-cvm
 
-## 2. Deploy the self-hosted KMS
+# 3. Render the measured compose
+../deploy/dstack/render-compose.sh \
+  "<image>@sha256:..." "caddy@sha256:..." "wallet-staging.<ip dashed>.sslip.io"
 
-Follow the pinned dstack-cloud GCP KMS procedure from the deployment operator's
-Linux host. Production mode requires:
+# 4. Secrets via encrypted env (only the admin secret)
+echo "WALLET_SERVICE_ADMIN_SECRET=$(openssl rand -hex 32)" > .env
 
-1. a dedicated dstack KMS TDX CVM;
-2. a production RPC endpoint and funded governance wallet;
-3. deployed KMS/app governance contracts;
-4. registration of the KMS OS image, aggregated measurement, and device ID;
-5. bootstrap and finish only after independently verifying its quote.
+# 5. Deploy + firewall
+dstack-cloud deploy --delete
+dstack-cloud fw allow 80 && dstack-cloud fw allow 443
+```
 
-Never place the governance private key, KMS seed, or generated `.env` in this
-repository.
+## Trust notes
 
-## 3. Deploy the wallet workload
-
-Use dstack-cloud on Linux with `key_provider: kms`, `gateway_enabled: false`,
-and the self-hosted KMS HTTPS URL. Copy this directory's compose file into the
-generated dstack project. Create `.env` from `.env.example`, generate the admin
-secret with `openssl rand -hex 32`, and let dstack encrypt the environment for
-the measured workload.
-
-The public ingress must proxy only to port 3020 on the dedicated CVM. Keep the
-current deployment serving traffic while the new service is tested by direct
-IP or a staging hostname.
-
-## 4. Acceptance checks
-
-All must pass before cutover:
-
-- Container logs show KMS key loading and no development-seed path.
-- `GET /health` is 200.
-- `GET /v1/attestation` returns `mode: "dstack"`, a non-null quote, event log,
-  VM config, and the expected manifest.
-- An independent verifier validates TDX evidence, RTMR replay, dstack OS image,
-  compose hash, and report-data hash.
-- KMS denies an image with an unapproved compose measurement.
-- Fresh DID smoke test passes enroll, create, sign, export, recovery, replay
-  rejection, and a Sepolia transaction.
-- Browser refuses dev/null quotes, altered manifests, stale challenges, wrong
-  service DID, wrong measurement, and substituted JWKs.
-- Monitoring alarms on quote/KMS/health failures.
-
-Only then switch ingress/DNS. Keep the old deployment stopped but recoverable
-for a short rollback window; because this is a clean epoch, old demo wallets do
-not exist in the new service. Destroy old seed/database copies only after an
-explicit backup-retention decision.
+- The compose template interpolates **only**
+  `WALLET_SERVICE_ADMIN_SECRET` from the (unmeasured) encrypted env.
+  Image digests, hostname, and SERVICE_DID are literal in the measured
+  compose — changing any of them changes the compose-hash and
+  therefore the attestation.
+- The Phala tdxlab KMS endpoints are fine for staging; production
+  custody should use a **self-hosted dstack-kms with on-chain
+  governance** so that key release is bound to explicitly authorized
+  measurements (see `docs/how-to/run-dstack-kms-on-gcp.md` in the
+  dstack-cloud docs).
+- `dstack-cloud deploy --delete` deletes and re-creates the data disk
+  (wallet DB!). Upgrades of a stateful deployment need the data-disk
+  preservation runbook (snapshot or auto-delete=no) — see the
+  repository README "Known gaps".

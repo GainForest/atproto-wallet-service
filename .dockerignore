@@ -1,13 +1,9 @@
-.git
-.env
-.env.*
-!.env.example
 node_modules
 dist
 data
-coverage
-*.tsbuildinfo
-AGENTS.md
-README.md
+.git
+.env
+*.md
 docs
+deploy
 src/__tests__
