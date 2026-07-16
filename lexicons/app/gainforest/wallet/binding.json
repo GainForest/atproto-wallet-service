@@ -1,0 +1,66 @@
+{
+  "lexicon": 1,
+  "id": "app.gainforest.wallet.binding",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Bidirectional attestation binding this repo's DID to an embedded wallet. The record lives in the user's repo (repo commit = DID vouches for wallet); walletSig is the wallet key's signature over the canonical binding message (wallet vouches for DID). Verifiers MUST check both directions.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["version", "evm", "sol", "createdAt"],
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "Binding message format version (currently 1)."
+          },
+          "evm": {
+            "type": "ref",
+            "ref": "#evmBinding"
+          },
+          "sol": {
+            "type": "ref",
+            "ref": "#solBinding"
+          },
+          "service": {
+            "type": "string",
+            "format": "did",
+            "description": "Optional DID of the wallet service holding the server share (e.g. did:web:wallet.example.com), for discovery."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    },
+    "evmBinding": {
+      "type": "object",
+      "required": ["address", "signatureHex"],
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "0x-prefixed EVM address."
+        },
+        "signatureHex": {
+          "type": "string",
+          "description": "secp256k1 signature (r||s hex, with recovery id appended as one byte) by the EVM wallet key over the EIP-191 digest of the canonical binding message 'atproto-wallet-binding:v1\\n<did>\\n<evmAddress>\\n<solAddress>'."
+        }
+      }
+    },
+    "solBinding": {
+      "type": "object",
+      "required": ["address"],
+      "properties": {
+        "address": {
+          "type": "string",
+          "description": "Base58 Solana address (ed25519 public key)."
+        },
+        "signatureHex": {
+          "type": "string",
+          "description": "Optional ed25519 signature by the Solana wallet key over the UTF-8 canonical binding message."
+        }
+      }
+    }
+  }
+}
