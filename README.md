@@ -14,9 +14,13 @@ wallet (Ethereum-compatible + Solana) keyed to their DID. There is no seed
 phrase to manage: keys are held as 2-of-3 Shamir shares (device,
 server-in-TEE, recovery), and only requests signed on the user's own device
 can spend. The target attested architecture prevents the operator from
-signing alone and lets users export their keys and leave. The current demo
-does **not** yet establish that guarantee; see
+signing alone and lets users export their keys and leave. The deleted measured
+prototype validated that flow with an explicitly operator-trusted static
+allowlist; no live deployment currently provides it. See the
 [Stateless TEE architecture review](docs/stateless-tee-design.md).
+
+For the BumiCerts wallet decision, see
+[Splits SmartVault vs. attested TDX wallet](docs/splits-smartvault-vs-tdx.md).
 
 ## How it works on the protocol
 

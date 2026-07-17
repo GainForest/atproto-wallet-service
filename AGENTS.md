@@ -110,6 +110,7 @@ can be restored. Allocate new addresses/hostnames and re-render measurements.
 | `lexicons/`                    | `app.gainforest.wallet.binding` lexicon                        |
 | `src/__tests__/`               | Vitest suites — one file per module                            |
 | `docs/stateless-tee-design.md` | Reviewed target architecture and migration plan                |
+| `docs/splits-smartvault-vs-tdx.md` | BumiCerts SmartVault/TDX decision and risk comparison       |
 
 ## Security invariants — do not break these
 
