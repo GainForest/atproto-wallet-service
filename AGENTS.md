@@ -28,6 +28,64 @@ pnpm format       # prettier --write .
 Needs Node >= 20 and a `.env` (copy `.env.example`; set
 `WALLET_SERVICE_ADMIN_SECRET` + `SERVICE_DID`).
 
+## GCP infrastructure status and rebuild procedure
+
+**There is no live TDX infrastructure.** On 2026-07-17 the cost-bearing GCP
+validation deployment in project `hypercerts-pds-472914` was intentionally and
+completely deleted. This included:
+
+- instances `wallet-cvm-staging`, `wallet-kms`, `wallet-kms-replica`, and
+  `epds-tee-spot`;
+- MIG `epds-tee-mig`, template `epds-tee-spot-tmpl`, all attached/durable
+  disks, and reserved addresses `wallet-staging-ip`, `wallet-kms-ip`,
+  `wallet-kms-replica-ip`, and `epds-tee-ip`;
+- dstack boot/shared/data images, TDX firewall rules, buckets
+  `hypercerts-dstack-images` and `hypercerts-pds-472914-dstack`, and Artifact
+  Registry repository `us-central1-docker.pkg.dev/hypercerts-pds-472914/wallet`.
+
+Do not treat old sslip.io endpoints, image digests, compose hashes, device IDs,
+or attestation output in reports/history as live. The Vercel MVP still has the
+old fail-closed pins and intentionally returns HTTP 503 until a new deployment
+is configured. Because the KMS durable disks were deleted, the old KMS root
+identity and the test wallets it protected are irrecoverable.
+
+To recreate the measured deployment:
+
+1. Read [deploy/dstack/README.md](deploy/dstack/README.md) and
+   [deploy/dstack/kms/README.md](deploy/dstack/kms/README.md) in full. Start
+   from service commit `86fe7a3` or newer and dstack OS `0.6.0` only after
+   reviewing current TDX advisories and upstream releases.
+2. Create a new private Artifact Registry repository and rebuild/publish the
+   digest-pinned wallet, KMS, auth-policy, and verifier images. The historical
+   registry and images no longer exist.
+3. Create fresh GCS image buckets, reserved IPs, narrowly scoped firewall
+   rules, and measured dstack project directories. Use `c3-standard-4` Intel
+   TDX in a supported zone. Preserve data disks only after production data
+   exists; never rely on a disposable boot disk for state.
+4. Deploy and bootstrap the first self-hosted KMS with `key_provider=tpm`, then
+   onboard a second KMS before issuing wallets. This creates a **new** root
+   identity. Protect both KMS instances/disks from deletion and verify that
+   both report the same root identity and `is_dev: false`.
+5. Deploy the wallet with `key_provider=kms`, `WALLET_SERVICE_ROOT_SEED_SOURCE=dstack-kms`,
+   the patched durable-disk behavior in `deploy/dstack/patch-dstack-cloud.py`,
+   and digest-pinned compose images. Use a fresh service hostname/DID.
+6. Deploy the verifier and authorization policy. The last validation used an
+   operator-managed static measurement allowlist, not decentralized governance;
+   document that trust boundary explicitly.
+7. Independently verify the full versioned evidence bundle: TDX quote, vTPM,
+   event-log replay, current TCB/advisories, exact OS hash, app ID, compose
+   hash, KMS provider, challenge binding, service DID, identity key, and wallet
+   encryption JWK.
+8. Update the `atproto-wallet-mvp` Vercel production variables with the new
+   URL/DID/verifier and exact measurements. Run tests/build, browser enrollment,
+   wallet create/sign/export/recovery, negative probes, and a real VM
+   recreation with an active zero-value wallet before calling it available.
+9. Record the final resource inventory and current list-price estimate in this
+   README. The deleted four-VM topology cost approximately $550–575/month.
+
+Never reuse the deleted deployment's service DID or claim that its wallet state
+can be restored. Allocate new addresses/hostnames and re-render measurements.
+
 ## Layout
 
 | Path                           | Role                                                           |

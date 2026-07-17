@@ -1,10 +1,12 @@
 # atproto-wallet-service
 
 > [!WARNING]
-> **Work in progress.** This code is experimental, deployed only as an
-> unattested demo, and not audited. The current deployment uses a file-based
-> root seed that a VM administrator can access; it is not operator-proof.
-> APIs and record schemas will change. Do not put real funds behind it.
+> **Work in progress.** This code is experimental and not audited. The measured
+> GCP Intel TDX deployment was validated end to end, then completely removed on
+> 2026-07-17 to stop recurring costs. There is currently no live wallet, KMS, or
+> verifier endpoint. The validated design used an operator-managed static
+> allowlist and therefore was not operator-proof. APIs and record schemas will
+> change. Do not put real funds behind it.
 
 A standalone, TEE-hosted embedded-wallet service for AT Protocol users on
 any PDS, including Bluesky-hosted accounts. Every user gets a self-custodial
@@ -68,6 +70,42 @@ pnpm dev               # plain process, NOT a real enclave
 pnpm test
 pnpm typecheck
 ```
+
+## Deployment status and estimated running cost
+
+There is currently **no live GCP TDX deployment**. On 2026-07-17 the wallet
+CVM, both KMS CVMs, verifier/policy Spot host, durable disks, reserved IPs,
+custom images, firewall rules, dstack buckets, MIG/template, and the wallet
+Artifact Registry repository were deleted. The prior wallet/KMS state and KMS
+root identity are not recoverable; a future deployment must bootstrap a new
+KMS identity and create new wallets.
+
+The deleted validation topology used three standard `c3-standard-4` Intel TDX
+VMs (wallet + two KMS replicas) and one Spot `c3-standard-4` TDX VM for the
+verifier/static policy and supporting services. At 730 hours/month, the
+estimated list-price cost was:
+
+- three standard C3 + TDX VMs: about **$487/month**;
+- one Spot C3 + TDX VM: about **$40/month** (Spot pricing varies);
+- balanced persistent disks, four public IPv4 addresses, image storage, and
+  light egress: about **$25–45/month**;
+- total: approximately **$550–575/month**, excluding existing Vercel/PDS plans
+  and operational labor.
+
+The estimate uses Google Cloud's published
+[C3](https://cloud.google.com/products/compute/pricing/general-purpose),
+[Confidential VM](https://cloud.google.com/confidential-computing/confidential-vm/pricing),
+[disk](https://cloud.google.com/compute/disks-image-pricing), and
+[IPv4](https://cloud.google.com/vpc/network-pricing) list prices. Actual Spot
+rates, negotiated discounts, tax, and traffic vary. With the resources deleted,
+this topology now incurs **$0/month of TDX compute, disk, reserved-IP, image,
+and registry cost**.
+
+To rebuild, follow [deploy/dstack/README.md](deploy/dstack/README.md) and
+[deploy/dstack/kms/README.md](deploy/dstack/kms/README.md). Images must be
+rebuilt and republished because the GCP Artifact Registry repository was
+removed. Future agents must also update the client-side measurement pins and
+service URLs after every fresh deployment; see [AGENTS.md](AGENTS.md).
 
 Production must run inside a confidential VM
 ([dstack](https://github.com/Dstack-TEE/dstack) on TDX/SEV-SNP) with the
