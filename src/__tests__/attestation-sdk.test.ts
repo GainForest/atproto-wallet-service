@@ -18,7 +18,7 @@ afterEach(async () => {
 })
 
 describe('official dstack SDK attestation adapter', () => {
-  it('returns quote, event log, and VM config from the guest agent', async () => {
+  it('returns the versioned evidence bundle from the guest agent', async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dstack-attestation-test-'))
     const socket = path.join(dir, 'dstack.sock')
     let requestBody: Record<string, unknown> | undefined
@@ -29,10 +29,7 @@ describe('official dstack SDK attestation adapter', () => {
         requestBody = JSON.parse(Buffer.concat(chunks).toString('utf8'))
         res.end(
           JSON.stringify({
-            quote: 'deadbeef',
-            event_log: '[]',
-            report_data: requestBody?.report_data,
-            vm_config: '{"cpu":4}',
+            attestation: 'deadbeef',
           }),
         )
       })
@@ -50,9 +47,8 @@ describe('official dstack SDK attestation adapter', () => {
     expect(result).toEqual({
       mode: 'dstack',
       reportData: reportDataHex,
-      quote: 'deadbeef',
-      eventLog: '[]',
-      vmConfig: '{"cpu":4}',
+      quote: null,
+      attestation: 'deadbeef',
     })
   })
 })

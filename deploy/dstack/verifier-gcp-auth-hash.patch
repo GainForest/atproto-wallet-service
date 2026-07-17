@@ -1,0 +1,187 @@
+diff --git a/verifier/src/verification.rs b/verifier/src/verification.rs
+index f7e67e8..3ab462d 100644
+--- a/verifier/src/verification.rs
++++ b/verifier/src/verification.rs
+@@ -27,6 +27,121 @@ use crate::types::{
+     VerificationRequest, VerificationResponse,
+ };
+ 
++fn pe_u16(data: &[u8], offset: usize, field: &str) -> Result<u16> {
++    let bytes: [u8; 2] = data
++        .get(offset..offset + 2)
++        .context(format!("PE image is truncated at {field}"))?
++        .try_into()
++        .expect("slice length checked");
++    Ok(u16::from_le_bytes(bytes))
++}
++
++fn pe_u32(data: &[u8], offset: usize, field: &str) -> Result<u32> {
++    let bytes: [u8; 4] = data
++        .get(offset..offset + 4)
++        .context(format!("PE image is truncated at {field}"))?
++        .try_into()
++        .expect("slice length checked");
++    Ok(u32::from_le_bytes(bytes))
++}
++
++fn pe_u64(data: &[u8], offset: usize, field: &str) -> Result<u64> {
++    let bytes: [u8; 8] = data
++        .get(offset..offset + 8)
++        .context(format!("disk image is truncated at {field}"))?
++        .try_into()
++        .expect("slice length checked");
++    Ok(u64::from_le_bytes(bytes))
++}
++
++fn gpt_first_partition_offset(path: &Path) -> Result<u64> {
++    const SECTOR_SIZE: u64 = 512;
++    let data = fs_err::read(path).context("Failed to read GCP disk.raw GPT")?;
++    if data.get(512..520) != Some(b"EFI PART") {
++        bail!("disk.raw has an invalid GPT signature");
++    }
++    let entries_lba = pe_u64(&data, 512 + 72, "GPT partition-entry LBA")?;
++    let entry_size = pe_u32(&data, 512 + 84, "GPT partition-entry size")? as u64;
++    if entry_size < 40 {
++        bail!("disk.raw has an invalid GPT partition-entry size");
++    }
++    let first_entry = entries_lba
++        .checked_mul(SECTOR_SIZE)
++        .context("GPT partition-entry offset overflow")? as usize;
++    let first_lba = pe_u64(&data, first_entry + 32, "GPT first partition LBA")?;
++    first_lba
++        .checked_mul(SECTOR_SIZE)
++        .context("GPT first partition offset overflow")
++}
++
++/// Compute the Microsoft Authenticode SHA-256 image digest used by GCP's
++/// measured UKI event. The checksum field and certificate table are excluded
++/// according to the PE/COFF Authenticode specification.
++fn authenticode_sha256(path: &Path) -> Result<String> {
++    let data = fs_err::read(path).context("Failed to read GCP UKI disk.raw")?;
++    let pe_offset = pe_u32(&data, 0x3c, "DOS header")? as usize;
++    if pe_u32(&data, pe_offset, "PE signature")? != 0x0000_4550 {
++        bail!("disk.raw has an invalid PE signature");
++    }
++    let coff = pe_offset + 4;
++    let section_count = pe_u16(&data, coff + 2, "section count")? as usize;
++    let optional_size = pe_u16(&data, coff + 16, "optional header size")? as usize;
++    let optional = coff + 20;
++    let pe32_plus = pe_u16(&data, optional, "optional header magic")? == 0x20b;
++    let checksum = optional + 64;
++    let data_dirs = optional + if pe32_plus { 112 } else { 96 };
++    let cert_dir = data_dirs + 4 * 8;
++    let headers_size = pe_u32(&data, optional + 60, "headers size")? as usize;
++    if headers_size > data.len() || checksum + 4 > cert_dir || cert_dir + 8 > headers_size {
++        bail!("disk.raw has invalid PE header offsets");
++    }
++
++    let mut hash = Sha256::new();
++    hash.update(&data[..checksum]);
++    hash.update(&data[checksum + 4..cert_dir]);
++    hash.update(&data[cert_dir + 8..headers_size]);
++
++    let section_table = optional + optional_size;
++    let mut sections = Vec::with_capacity(section_count);
++    for index in 0..section_count {
++        let entry = section_table + index * 40;
++        let size = pe_u32(&data, entry + 16, "section size")? as usize;
++        let offset = pe_u32(&data, entry + 20, "section offset")? as usize;
++        if size > 0 {
++            sections.push((offset, size));
++        }
++    }
++    sections.sort_unstable_by_key(|(offset, _)| *offset);
++    let mut hashed_bytes = headers_size;
++    for (offset, size) in sections {
++        let end = offset.checked_add(size).context("PE section size overflow")?;
++        if offset < data.len() {
++            hash.update(&data[offset..end.min(data.len())]);
++        }
++        hashed_bytes = hashed_bytes.saturating_add(size);
++    }
++
++    let cert_offset = pe_u32(&data, cert_dir, "certificate offset")? as usize;
++    let cert_size = pe_u32(&data, cert_dir + 4, "certificate size")? as usize;
++    if cert_offset > 0 && cert_size > 0 && data.len() > hashed_bytes {
++        let trailing = data.len() - hashed_bytes;
++        if trailing > cert_size {
++            let trailing_len = trailing - cert_size;
++            let end = hashed_bytes
++                .checked_add(trailing_len)
++                .context("PE trailing data overflow")?;
++            if end <= data.len() {
++                hash.update(&data[hashed_bytes..end]);
++            }
++        }
++    }
++    let remainder = data.len() % 8;
++    if remainder != 0 {
++        hash.update(vec![0u8; 8 - remainder]);
++    }
++    Ok(hex::encode(hash.finalize()))
++}
++
+ fn collect_rtmr_mismatch(
+     rtmr_label: &str,
+     expected: &[u8],
+@@ -783,10 +898,46 @@ impl CvmVerifier {
+             );
+         }
+ 
+-        // Remove the files that are not listed in sha256sum.txt
+         let sha256sum_path = extracted_dir.join("sha256sum.txt");
+         let files_doc =
+             fs_err::read_to_string(&sha256sum_path).context("Failed to read sha256sum.txt")?;
++
++        // Bare-metal images identify the OS as SHA256(sha256sum.txt). GCP
++        // dstack-cloud images boot a signed UKI and quote its PE/COFF
++        // Authenticode hash instead. For that format independently recompute
++        // the hash from disk.raw; never trust auth_hash.txt by itself.
++        let bare_image_hash = hex::encode(Sha256::new_with_prefix(files_doc.as_bytes()).finalize());
++        if bare_image_hash != hex_os_image_hash {
++            let declared_auth_hash = fs_err::read_to_string(extracted_dir.join("auth_hash.txt"))
++                .context("GCP UKI image is missing auth_hash.txt")?;
++            if declared_auth_hash.trim() != hex_os_image_hash {
++                bail!("auth_hash.txt does not match the quoted OS image hash");
++            }
++            let disk_path = extracted_dir.join("disk.raw");
++            let uki_path = extracted_dir.join("BOOTX64.EFI");
++            let image_spec = format!(
++                "{}@@{}",
++                disk_path.display(),
++                gpt_first_partition_offset(&disk_path)?
++            );
++            let output = Command::new("mcopy")
++                .args(["-i", &image_spec, "::/EFI/BOOT/BOOTX64.EFI"])
++                .arg(&uki_path)
++                .output()
++                .await
++                .context("Failed to extract the GCP UKI from disk.raw")?;
++            if !output.status.success() {
++                bail!(
++                    "Failed to extract the GCP UKI from disk.raw: {}",
++                    String::from_utf8_lossy(&output.stderr)
++                );
++            }
++            if authenticode_sha256(&uki_path)? != hex_os_image_hash {
++                bail!("GCP UKI Authenticode hash does not match the quoted OS image hash");
++            }
++        }
++
++        // Remove files not used by dstack-mr after authenticating the GCP UKI.
+         let listed_files: Vec<&OsStr> = files_doc
+             .lines()
+             .flat_map(|line| line.split_whitespace().nth(1))
+@@ -805,12 +956,6 @@ impl CvmVerifier {
+             }
+         }
+ 
+-        // os_image_hash should eq to sha256sum of the sha256sum.txt
+-        let os_image_hash = Sha256::new_with_prefix(files_doc.as_bytes()).finalize();
+-        if hex::encode(os_image_hash) != hex_os_image_hash {
+-            bail!("os_image_hash does not match sha256sum of the sha256sum.txt");
+-        }
+-
+         // Move the extracted files to the destination directory
+         let metadata_path = extracted_dir.join("metadata.json");
+         if !metadata_path.exists() {

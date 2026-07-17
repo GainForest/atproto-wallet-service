@@ -6,4 +6,7 @@ data
 *.md
 docs
 deploy
+!deploy/
+!deploy/dstack/
+!deploy/dstack/verifier-gcp-auth-hash.patch
 src/__tests__

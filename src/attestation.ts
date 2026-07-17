@@ -37,11 +37,12 @@ export interface AttestationResult {
   mode: 'dstack' | 'tdx-tsm' | 'dev'
   /** hex SHA-256 of the signer identity public key, bound into the quote */
   reportData: string
-  /** hex-encoded hardware quote, or null in dev mode */
+  /** hex-encoded raw hardware quote (native TSM) or null. */
   quote: string | null
-  /** Measured dstack event log required to replay the RTMR values. */
+  /** Versioned dstack evidence bundle (TDX + vTPM + logs + VM config). */
+  attestation?: string
+  /** Raw dstack quote evidence fields retained for compatibility/debugging. */
   eventLog?: string
-  /** dstack VM configuration covered by the attestation evidence. */
   vmConfig?: string
   /** kernel TSM provider (tdx-tsm mode), e.g. "tdx_guest" */
   provider?: string
@@ -50,25 +51,21 @@ export interface AttestationResult {
 
 const DEFAULT_DSTACK_SOCK = '/var/run/dstack.sock'
 
-/** Fetch quote evidence through the official dstack guest-agent SDK. */
-async function fetchDstackQuote(
+/** Fetch the versioned GCP evidence bundle through the official SDK. */
+async function fetchDstackAttestation(
   socketPath: string,
   reportDataHex: string,
-): Promise<{ quote: string; eventLog: string; vmConfig?: string }> {
-  const result = await new DstackClient(socketPath).getQuote(
+): Promise<string> {
+  const result = await new DstackClient(socketPath).attest(
     Buffer.from(reportDataHex, 'hex'),
   )
-  if (typeof result.quote !== 'string' || result.quote.length === 0) {
-    throw new Error('dstack response missing quote')
+  if (
+    typeof result.attestation !== 'string' ||
+    result.attestation.length === 0
+  ) {
+    throw new Error('dstack response missing attestation bundle')
   }
-  if (typeof result.event_log !== 'string' || result.event_log.length === 0) {
-    throw new Error('dstack response missing event log')
-  }
-  return {
-    quote: result.quote,
-    eventLog: result.event_log,
-    vmConfig: result.vm_config,
-  }
+  return result.attestation
 }
 
 /** GET /quote from the local root-owned TDX quote helper. */
@@ -132,13 +129,15 @@ export async function getAttestation(opts: {
   const sockPath = opts.dstackSockPath ?? DEFAULT_DSTACK_SOCK
   if (fs.existsSync(sockPath)) {
     try {
-      const evidence = await fetchDstackQuote(sockPath, opts.reportDataHex)
+      const attestation = await fetchDstackAttestation(
+        sockPath,
+        opts.reportDataHex,
+      )
       return {
         mode: 'dstack',
         reportData: opts.reportDataHex,
-        quote: evidence.quote,
-        eventLog: evidence.eventLog,
-        vmConfig: evidence.vmConfig,
+        quote: null,
+        attestation,
       }
     } catch (err) {
       const message = `dstack socket present but quote failed: ${err instanceof Error ? err.message : String(err)}`

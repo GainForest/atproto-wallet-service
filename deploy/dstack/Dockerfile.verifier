@@ -8,12 +8,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git clone --filter=blob:none https://github.com/Phala-Network/dstack-cloud.git /src \
   && cd /src && git fetch --depth 1 origin ${DSTACK_REV} \
   && git checkout ${DSTACK_REV}
+COPY deploy/dstack/verifier-gcp-auth-hash.patch /tmp/verifier-gcp-auth-hash.patch
+RUN cd /src && git apply /tmp/verifier-gcp-auth-hash.patch
 RUN rustup target add x86_64-unknown-linux-musl \
   && cd /src && cargo build --release -p dstack-verifier \
        --target x86_64-unknown-linux-musl
 
 FROM debian:bookworm-slim@sha256:0d8498a0e9e6a60011df39aab78534cfe940785e7c59d19dfae1eb53ea59babe
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates mtools \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/x86_64-unknown-linux-musl/release/dstack-verifier /usr/local/bin/dstack-verifier
 USER 65532:65532
